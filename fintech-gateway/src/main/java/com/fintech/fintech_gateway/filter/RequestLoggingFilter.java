@@ -193,8 +193,8 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
 
             // Allow — forward to backend
             if ("POST".equalsIgnoreCase(method) && idempotencyKey != null) {
-                CachedResponseWrapper wrappedResponse =
-                        new CachedResponseWrapper(response);
+                CachedResponseWrapper wrappedResponse = new CachedResponseWrapper(response);
+                response.setContentType("application/json");  // ADD THIS LINE
                 filterChain.doFilter(request, wrappedResponse);
                 String capturedBody = wrappedResponse.getCapturedBody();
                 idempotencyService.markCompleted(idempotencyKey, capturedBody);
