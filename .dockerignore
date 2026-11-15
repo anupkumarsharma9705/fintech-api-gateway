@@ -1,0 +1,21 @@
+# Keep the Docker build context small and free of local secrets.
+.git
+.gitignore
+.github
+.idea
+.vscode
+**/target
+**/logs
+logs
+node_modules
+**/node_modules
+fintech-frontend
+load-tests
+.env
+.env.*
+!.env.example
+*.log
+**/*.md
+.aider*
+File Listing
+path/

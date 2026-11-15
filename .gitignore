@@ -1,0 +1,49 @@
+# Build output
+target/
+**/target/
+*.class
+*.jar
+*.war
+*.ear
+
+# IDE / editor
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+
+# Logs and runtime data
+logs/
+*.log
+*.hprof
+hs_err_pid*
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pem
+*.key
+secrets/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# AI / scratch artifacts
+.aider*
+File Listing
+path/
+verify-output.txt
+
+# Maven wrapper cache
+.mvn/wrapper/maven-wrapper.jar
