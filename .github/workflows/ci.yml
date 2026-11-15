@@ -73,9 +73,13 @@ jobs:
 
           curl -fsS "$base/health"
           curl -fsS "$base/actuator/health/readiness"
-          curl -fsS "$base/actuator/prometheus" | grep '^gateway_' > /dev/null
 
           curl -fsS "$base/api/account/balance?accountId=ACC123" | grep -q '"balance":50000'
+
+          # Gateway counters are registered lazily on first recording, so a
+          # scrape before any traffic is legitimately empty. Assert a named
+          # gateway series after the balance call above.
+          curl -fsS "$base/actuator/prometheus" | grep '^gateway_requests_total' > /dev/null
 
           pay='{"fromAccountId":"ACC123","toAccountId":"ACC456","amount":500,"currency":"INR","idempotencyKey":"ci-payment-1"}'
           curl -fsS -X POST "$base/api/payments/transfer" \
