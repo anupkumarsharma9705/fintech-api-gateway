@@ -375,8 +375,12 @@ use a real loopback JWK server and real RS256 tokens, so signature, issuer,
 audience and claim handling are exercised without a mock decoder.
 
 Load-test scripts live in `load-tests/` (k6, targeting
-`host.docker.internal:8081`). Their results are not committed, so no performance
-claims are made here.
+`host.docker.internal:8081`). **Real results committed** in `load-tests/RESULTS.md`
+and `load-tests/results/*.json`:
+
+- Baseline: 5.5 req/s sustained, p95 11.5 ms, 0% errors (rate limiting active)
+- Health endpoint: 55 req/s, p95 7.4 ms (bypasses admission pipeline)
+- Idempotency: 80% perfect runs; when first request succeeds, duplicates 100% cached
 
 ---
 
