@@ -71,42 +71,63 @@ jobs:
           set -euo pipefail
           base=http://127.0.0.1:8081
 
+          echo "=== Health checks ==="
           curl -fsS "$base/health"
+          echo
           curl -fsS "$base/actuator/health/readiness"
+          echo
 
-          curl -fsS "$base/api/account/balance?accountId=ACC123" | grep -q '"balance":50000'
+          echo "=== Balance check ==="
+          balance_resp=$(curl -fsS "$base/api/account/balance?accountId=ACC123")
+          echo "Response: $balance_resp"
+          echo "$balance_resp" | grep -q '"balance":50000'
 
-          # Gateway counters are registered lazily on first recording, so a
-          # scrape before any traffic is legitimately empty. Assert a named
-          # gateway series after the balance call above.
+          echo "=== Prometheus metrics (after traffic) ==="
           curl -fsS "$base/actuator/prometheus" | grep '^gateway_requests_total' > /dev/null
+          echo "Metrics OK"
 
+          echo "=== Payment + idempotency ==="
           pay='{"fromAccountId":"ACC123","toAccountId":"ACC456","amount":500,"currency":"INR","idempotencyKey":"ci-payment-1"}'
-          curl -fsS -X POST "$base/api/payments/transfer" \
+          pay_resp=$(curl -fsS -X POST "$base/api/payments/transfer" \
             -H 'Content-Type: application/json' \
             -H 'Idempotency-Key: ci-payment-1' \
-            -d "$pay" | grep -q '"status":"SUCCESS"'
+            -d "$pay")
+          echo "First payment: $pay_resp"
+          echo "$pay_resp" | grep -q '"status":"SUCCESS"'
 
           curl -fsS -D replay.headers -o replay.json -X POST "$base/api/payments/transfer" \
             -H 'Content-Type: application/json' \
             -H 'Idempotency-Key: ci-payment-1' \
             -d "$pay"
           grep -qi '^Idempotency-Replayed: true' replay.headers
+          echo "Replay OK"
 
+          echo "=== Security checks ==="
           test "$(curl -sS -o /dev/null -w '%{http_code}' \
             "$base/api/account/balance?accountId=ACC123%27%20OR%20%271%27%3D%271")" = 403
+          echo "SQLi 403 OK"
+
           test "$(curl -sS -o /dev/null -w '%{http_code}' -X PROPFIND \
             "$base/api/account/balance?accountId=ACC123")" = 405
+          echo "PROPFIND 405 OK"
+
           test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
             "$base/api/payments/transfer" -H 'Content-Type: application/json' \
             -H 'Content-Encoding: gzip' -d 'not-gzip')" = 415
+          echo "Gzip 415 OK"
+
           test "$(curl -sS -o /dev/null -w '%{http_code}' \
             "$base/feedback/summary")" = 401
+          echo "Feedback 401 OK"
 
+          echo "=== Compliance export ==="
           curl -fsS "$base/compliance/evidence/summary" \
             -H 'X-Internal-Ops-Key: dev-ops-key-change-me' | grep -q '"attestation"'
+          echo "Summary OK"
+
           curl -fsS "$base/compliance/evidence/audit.csv?limit=10" \
             -H 'X-Internal-Ops-Key: dev-ops-key-change-me' | grep -q '^id,timestamp,tenant_id'
+          echo "CSV OK"
 
       - name: Dump stack logs on failure
         if: failure()
