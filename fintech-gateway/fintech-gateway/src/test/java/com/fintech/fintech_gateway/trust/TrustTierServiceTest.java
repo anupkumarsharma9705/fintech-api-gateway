@@ -45,42 +45,6 @@ class TrustTierServiceTest {
     }
 
     @Test
-    void unknownIpDefaultsToMedium() {
-        when(redisTemplate.hasKey("blacklist:" + IP)).thenReturn(false);
-        when(valueOperations.get("trust:" + IP)).thenReturn(null);
-
-        assertEquals(TrustTier.MEDIUM, service.getTrustTier(IP));
-    }
-
-    @Test
-    void storedTierIsReturned() {
-        when(redisTemplate.hasKey("blacklist:" + IP)).thenReturn(false);
-        when(valueOperations.get("trust:" + IP)).thenReturn("HIGH");
-
-        assertEquals(TrustTier.HIGH, service.getTrustTier(IP));
-    }
-
-    @Test
-    void blacklistedIpShortCircuitsTierLookup() {
-        when(redisTemplate.hasKey("blacklist:" + IP)).thenReturn(true);
-
-        assertEquals(TrustTier.BLACKLISTED, service.getTrustTier(IP));
-        verify(valueOperations, never()).get("trust:" + IP);
-    }
-
-    @Test
-    void redisReadFailureFailsClosed() {
-        when(redisTemplate.hasKey("blacklist:" + IP))
-                .thenThrow(new RedisConnectionFailureException("down"));
-
-        GatewayRequestException exception = assertThrows(GatewayRequestException.class,
-                () -> service.getTrustTier(IP));
-
-        assertEquals(503, exception.getStatus().value());
-        assertEquals("trust_store_unavailable", exception.getCode());
-    }
-
-    @Test
     @SuppressWarnings("unchecked")
     void firstBlockDowngradesToLowWithShortCooldown() {
         when(valueOperations.get("trust:" + IP)).thenReturn(null);
@@ -146,17 +110,50 @@ class TrustTierServiceTest {
     @Test
     @SuppressWarnings("unchecked")
     void sustainedGoodBehaviourUpgradesToHigh() {
-        when(redisTemplate.hasKey("blacklist:" + IP)).thenReturn(false);
-        when(valueOperations.get("trust:" + IP)).thenReturn(null);
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenReturn(100L);
 
-        service.recordGoodBehaviour(IP);
+        service.recordSuccess(IP, TrustTier.MEDIUM);
 
         verify(valueOperations).set("trust:" + IP, "HIGH", Duration.ofDays(7));
         verify(redisTemplate).delete("goodcount:" + IP);
         verify(persistenceService).saveTrustHistory(IP, "MEDIUM", "HIGH",
                 "Sustained clean traffic");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void cleanTrafficBelowThresholdDoesNotUpgrade() {
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenReturn(99L);
+
+        service.recordSuccess(IP, TrustTier.MEDIUM);
+
+        verify(valueOperations, never()).set(anyString(), anyString(), any(Duration.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void cleanTrafficFromNonMediumTierDoesNotCount() {
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenReturn(0L);
+
+        service.recordSuccess(IP, TrustTier.HIGH);
+
+        verify(persistenceService, never()).saveTrustHistory(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void successRecordingFailureIsBestEffort() {
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenThrow(new RedisConnectionFailureException("down"));
+
+        service.recordSuccess(IP, TrustTier.MEDIUM);
+
+        verify(persistenceService, never()).saveTrustHistory(anyString(), anyString(),
+                anyString(), anyString());
     }
 
     @Test

@@ -34,9 +34,13 @@ EXPOSE 8081
 # Audit and application logs are written here. Mount a volume in production,
 # or set LOG_DIR to a path collected by your log shipper.
 ENV LOG_DIR=/var/log/fintech \
-    TZ=UTC
+    TZ=UTC \
+    JAVA_OPTS="-XX:MaxRAMPercentage=75 -XX:InitialRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -XX:+UseG1GC -XX:MaxGCPauseMillis=20"
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
     CMD curl -fsS http://localhost:8081/actuator/health/liveness || exit 1
 
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-XX:+ExitOnOutOfMemoryError", "-jar", "/app/app.jar"]
+# exec keeps the JVM as PID 1 so SIGTERM reaches it and shutdown is graceful.
+# JAVA_OPTS is intentionally expanded: operators can override heap sizing and
+# GC flags per environment without rebuilding the image.
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

@@ -1,5 +1,6 @@
 package com.fintech.fintech_gateway.filter;
 
+import com.fintech.fintech_gateway.admission.AdmissionGate;
 import com.fintech.fintech_gateway.attack.AttackDetectionService;
 import com.fintech.fintech_gateway.attack.AttackDetectionService.AttackDetectionResult;
 import com.fintech.fintech_gateway.audit.AuditLogger;
@@ -59,6 +60,7 @@ class RequestLoggingFilterTest {
     private static final String REQUEST_ID = "req-12345678";
 
     private TrustTierService trustTierService;
+    private AdmissionGate admissionGate;
     private RateLimiter rateLimiter;
     private RiskScoringEngine riskScoringEngine;
     private RiskDecisionEngine riskDecisionEngine;
@@ -73,6 +75,7 @@ class RequestLoggingFilterTest {
     void setUp() {
         properties = TestProperties.defaults();
         trustTierService = mock(TrustTierService.class);
+        admissionGate = mock(AdmissionGate.class);
         rateLimiter = mock(RateLimiter.class);
         riskScoringEngine = mock(RiskScoringEngine.class);
         riskDecisionEngine = mock(RiskDecisionEngine.class);
@@ -83,6 +86,7 @@ class RequestLoggingFilterTest {
 
         filter = new RequestLoggingFilter(
                 trustTierService,
+                admissionGate,
                 rateLimiter,
                 riskScoringEngine,
                 riskDecisionEngine,
@@ -96,7 +100,8 @@ class RequestLoggingFilterTest {
                 properties,
                 new GatewayMetrics(registry));
 
-        when(trustTierService.getTrustTier(anyString())).thenReturn(TrustTier.MEDIUM);
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
+                .thenReturn(new AdmissionGate.Decision(true, TrustTier.MEDIUM, false, 30, 29, 0));
         when(rateLimiter.check(anyString(), anyString(), any(TrustTier.class), anyString(), anyInt()))
                 .thenReturn(new RateLimiter.Decision(true, 30, 29, 0));
         when(attackDetectionService.inspect(any(), any(), any()))
@@ -113,12 +118,14 @@ class RequestLoggingFilterTest {
                 (req, res) -> invoked.set(true));
 
         assertTrue(invoked.get());
-        verifyNoInteractions(trustTierService, rateLimiter, attackDetectionService, auditLogger);
+        verifyNoInteractions(trustTierService, admissionGate, rateLimiter, attackDetectionService,
+                auditLogger);
     }
 
     @Test
     void blacklistedCallerIsRejectedWithoutProxying() throws Exception {
-        when(trustTierService.getTrustTier(IP)).thenReturn(TrustTier.BLACKLISTED);
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
+                .thenReturn(new AdmissionGate.Decision(false, TrustTier.BLACKLISTED, true, 0, 0, 0));
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
@@ -140,8 +147,8 @@ class RequestLoggingFilterTest {
 
     @Test
     void rateLimitedCallerIsRejectedWithRetryMetadata() throws Exception {
-        when(rateLimiter.check(anyString(), anyString(), any(TrustTier.class), anyString(), anyInt()))
-                .thenReturn(new RateLimiter.Decision(false, 30, 0, 12));
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
+                .thenReturn(new AdmissionGate.Decision(false, TrustTier.MEDIUM, false, 30, 0, 12));
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
@@ -222,8 +229,6 @@ class RequestLoggingFilterTest {
     void throttledRequestStillProxiesAndConsumesExtraBudget() throws Exception {
         when(riskScoringEngine.calculateScore(any(), any(TrustTier.class))).thenReturn(50);
         when(riskDecisionEngine.decide(50)).thenReturn(Decision.THROTTLE);
-        when(rateLimiter.check(anyString(), anyString(), any(TrustTier.class), anyString(), eq(1)))
-                .thenReturn(new RateLimiter.Decision(true, 30, 29, 0));
         when(rateLimiter.check(anyString(), anyString(), any(TrustTier.class), anyString(), eq(3)))
                 .thenReturn(new RateLimiter.Decision(true, 30, 26, 0));
         MockHttpServletResponse response = new MockHttpServletResponse();
@@ -245,8 +250,6 @@ class RequestLoggingFilterTest {
     void exhaustedThrottleBudgetIsRejected() throws Exception {
         when(riskScoringEngine.calculateScore(any(), any(TrustTier.class))).thenReturn(50);
         when(riskDecisionEngine.decide(50)).thenReturn(Decision.THROTTLE);
-        when(rateLimiter.check(anyString(), anyString(), any(TrustTier.class), anyString(), eq(1)))
-                .thenReturn(new RateLimiter.Decision(true, 30, 29, 0));
         when(rateLimiter.check(anyString(), anyString(), any(TrustTier.class), anyString(), eq(3)))
                 .thenReturn(new RateLimiter.Decision(false, 30, 0, 7));
         MockHttpServletResponse response = new MockHttpServletResponse();
@@ -511,7 +514,7 @@ class RequestLoggingFilterTest {
 
     @Test
     void redisFailureFailsClosedWith503() throws Exception {
-        when(trustTierService.getTrustTier(IP))
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
                 .thenThrow(new RedisConnectionFailureException("redis down"));
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
@@ -527,7 +530,7 @@ class RequestLoggingFilterTest {
 
     @Test
     void unexpectedPipelineFailureFailsClosedWith503() throws Exception {
-        when(rateLimiter.check(anyString(), anyString(), any(TrustTier.class), anyString(), anyInt()))
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("unexpected"));
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
@@ -550,7 +553,7 @@ class RequestLoggingFilterTest {
         filter.doFilter(request, response, chain);
 
         verify(chain, never()).doFilter(any(), any());
-        verifyNoInteractions(trustTierService, rateLimiter);
+        verifyNoInteractions(trustTierService, admissionGate, rateLimiter);
         assertEquals(400, response.getStatus());
         assertTrue(response.getContentAsString().contains("invalid_tenant"));
         AuditEvent event = capturedAudit();
@@ -576,8 +579,7 @@ class RequestLoggingFilterTest {
         filter.doFilter(get("/api/account/balance"), response,
                 (req, res) -> response.setStatus(200));
 
-        verify(trustTierService).recordGoodBehaviour(IP);
-        verify(trustTierService).resetThrottleCount(IP);
+        verify(trustTierService).recordSuccess(IP, TrustTier.MEDIUM);
     }
 
     @Test
@@ -587,8 +589,7 @@ class RequestLoggingFilterTest {
         filter.doFilter(get("/api/account/balance"), response,
                 (req, res) -> response.setStatus(404));
 
-        verify(trustTierService, never()).recordGoodBehaviour(anyString());
-        verify(trustTierService, never()).resetThrottleCount(anyString());
+        verify(trustTierService, never()).recordSuccess(anyString(), any(TrustTier.class));
     }
 
     @Test

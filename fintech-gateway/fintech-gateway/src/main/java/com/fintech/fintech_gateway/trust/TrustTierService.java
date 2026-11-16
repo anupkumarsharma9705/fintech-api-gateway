@@ -1,7 +1,5 @@
 package com.fintech.fintech_gateway.trust;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import com.fintech.fintech_gateway.persistence.PersistenceService;
 import com.fintech.fintech_gateway.web.GatewayRequestException;
 import org.slf4j.Logger;
@@ -10,6 +8,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -18,14 +17,15 @@ import java.util.List;
 /**
  * Adaptive trust tiers backed by Redis.
  *
- * <p>Reads fail closed: if Redis cannot answer whether an IP is blacklisted,
- * the gateway rejects the request instead of guessing that the caller is
- * trustworthy. Writes (recording blocks/throttles/good behaviour) are
- * best-effort because the request decision has already been made; failures
- * are logged and the durable audit trail still records the security event.</p>
+ * <p>The admission read path lives in {@code AdmissionGate}, which resolves the
+ * blacklist and tier inside the same Lua call as the rate-limit check so a
+ * request never pays for separate round trips. This service owns the writes:
+ * penalties (blocks, throttles) and the asynchronous clean-traffic counter.</p>
  *
- * <p>Only the non-blacklist tier is cached, for at most 30 seconds, and every
- * mutation invalidates the entry. Blacklist state is never cached.</p>
+ * <p>Writes are best-effort because the request decision has already been made;
+ * failures are logged and the durable audit trail still records the security
+ * event. Operator resets fail loudly instead, because an operator must know the
+ * reset did not apply.</p>
  */
 @Service
 public class TrustTierService {
@@ -55,55 +55,36 @@ public class TrustTierService {
             return count
             """, Long.class);
 
+    /**
+     * Records a clean request in one round trip: clears the throttle counter
+     * and, for MEDIUM callers only, increments the good-behaviour counter.
+     *
+     * <p>KEYS: good-behaviour counter, throttle counter.
+     * ARGV: current tier, good-behaviour TTL (seconds).</p>
+     */
+    private static final DefaultRedisScript<Long> RECORD_SUCCESS = new DefaultRedisScript<>("""
+            redis.call('DEL', KEYS[2])
+            if ARGV[1] ~= 'MEDIUM' then
+              return 0
+            end
+            local count = redis.call('INCR', KEYS[1])
+            if count == 1 then
+              redis.call('EXPIRE', KEYS[1], ARGV[2])
+            end
+            return count
+            """, Long.class);
+
     public enum TrustTier {
         HIGH, MEDIUM, LOW, BLACKLISTED
     }
 
     private final StringRedisTemplate redisTemplate;
     private final PersistenceService persistenceService;
-    private final Cache<String, TrustTier> tierCache;
 
     public TrustTierService(StringRedisTemplate redisTemplate,
                             PersistenceService persistenceService) {
         this.redisTemplate = redisTemplate;
         this.persistenceService = persistenceService;
-        this.tierCache = Caffeine.newBuilder()
-                .maximumSize(100_000)
-                .expireAfterWrite(Duration.ofSeconds(30))
-                .build();
-    }
-
-    public TrustTier getTrustTier(String ip) {
-        if (isBlacklisted(ip)) {
-            return TrustTier.BLACKLISTED;
-        }
-        TrustTier cached = tierCache.getIfPresent(ip);
-        if (cached != null) {
-            return cached;
-        }
-        TrustTier resolved;
-        try {
-            String tier = redisTemplate.opsForValue().get(TRUST_KEY + ip);
-            resolved = parseTier(tier);
-        } catch (DataAccessException e) {
-            log.error("Trust store unavailable while resolving tier for {}", ip, e);
-            throw new GatewayRequestException(HttpStatus.SERVICE_UNAVAILABLE,
-                    "trust_store_unavailable",
-                    "Request screening is temporarily unavailable. Retry shortly.");
-        }
-        tierCache.put(ip, resolved);
-        return resolved;
-    }
-
-    public boolean isBlacklisted(String ip) {
-        try {
-            return Boolean.TRUE.equals(redisTemplate.hasKey(BLACKLIST_KEY + ip));
-        } catch (DataAccessException e) {
-            log.error("Trust store unavailable while checking blacklist for {}", ip, e);
-            throw new GatewayRequestException(HttpStatus.SERVICE_UNAVAILABLE,
-                    "trust_store_unavailable",
-                    "Request screening is temporarily unavailable. Retry shortly.");
-        }
     }
 
     public void recordBlock(String ip) {
@@ -125,7 +106,6 @@ public class TrustTierService {
                         "Blocked " + blockCount + " times; cooldown " + cooldown);
                 log.info("IP {} downgraded to LOW trust for {}", ip, cooldown);
             }
-            tierCache.invalidate(ip);
         } catch (RuntimeException e) {
             // The request was already blocked; failing to persist the
             // downgrade must not change that decision.
@@ -133,24 +113,32 @@ public class TrustTierService {
         }
     }
 
-    public void recordGoodBehaviour(String ip) {
+    /**
+     * Records a successful request off the request thread. The admission
+     * decision has already been made, so this is best-effort: a failure here
+     * must never turn a served request into an error.
+     *
+     * <p>The tier is passed in rather than re-read, because the admission
+     * script already resolved it. Re-reading it would add another round trip
+     * and could observe a tier change that happened after the decision.</p>
+     */
+    @Async("auditExecutor")
+    public void recordSuccess(String ip, TrustTier tier) {
         try {
-            TrustTier current = getTrustTier(ip);
-            if (current != TrustTier.MEDIUM) {
-                return;
-            }
-            Long goodCount = incrementWithTtl(GOOD_COUNT_KEY + ip, GOOD_BEHAVIOUR_WINDOW);
+            Long goodCount = redisTemplate.execute(RECORD_SUCCESS,
+                    List.of(GOOD_COUNT_KEY + ip, THROTTLE_COUNT_KEY + ip),
+                    tier.name(),
+                    String.valueOf(GOOD_BEHAVIOUR_WINDOW.toSeconds()));
             if (goodCount != null && goodCount >= GOOD_BEHAVIOUR_THRESHOLD) {
                 redisTemplate.opsForValue()
                         .set(TRUST_KEY + ip, TrustTier.HIGH.name(), HIGH_TRUST_TTL);
                 redisTemplate.delete(GOOD_COUNT_KEY + ip);
-                tierCache.invalidate(ip);
                 persistenceService.saveTrustHistory(ip, TrustTier.MEDIUM.name(), TrustTier.HIGH.name(),
                         "Sustained clean traffic");
                 log.info("IP {} upgraded to HIGH trust", ip);
             }
         } catch (RuntimeException e) {
-            log.error("Failed to record good behaviour for {}", ip, e);
+            log.error("Failed to record successful request for {}", ip, e);
         }
     }
 
@@ -167,7 +155,6 @@ public class TrustTierService {
             if (count >= THROTTLE_DEGRADE_THRESHOLD) {
                 redisTemplate.opsForValue()
                         .set(TRUST_KEY + ip, TrustTier.LOW.name(), Duration.ofMinutes(30));
-                tierCache.invalidate(ip);
                 persistenceService.saveTrustHistory(ip, "UNKNOWN", TrustTier.LOW.name(),
                         "Repeated throttle violations: " + count);
                 log.info("IP {} downgraded to LOW trust after {} throttles", ip, count);
@@ -176,14 +163,6 @@ public class TrustTierService {
         } catch (RuntimeException e) {
             log.error("Failed to record throttle for {}", ip, e);
             return 0;
-        }
-    }
-
-    public void resetThrottleCount(String ip) {
-        try {
-            redisTemplate.delete(THROTTLE_COUNT_KEY + ip);
-        } catch (RuntimeException e) {
-            log.error("Failed to reset throttle count for {}", ip, e);
         }
     }
 
@@ -207,7 +186,6 @@ public class TrustTierService {
                     "trust_store_unavailable",
                     "Trust state could not be reset. Retry shortly.");
         }
-        tierCache.invalidate(ip);
         persistenceService.saveTrustHistory(ip, previous.name(), TrustTier.MEDIUM.name(), reason);
         log.info("Trust state reset to MEDIUM for {} ({})", ip, reason);
     }
@@ -227,10 +205,6 @@ public class TrustTierService {
     }
 
     private TrustTier currentTierBestEffort(String ip) {
-        TrustTier cached = tierCache.getIfPresent(ip);
-        if (cached != null) {
-            return cached;
-        }
         try {
             return parseTier(redisTemplate.opsForValue().get(TRUST_KEY + ip));
         } catch (RuntimeException e) {

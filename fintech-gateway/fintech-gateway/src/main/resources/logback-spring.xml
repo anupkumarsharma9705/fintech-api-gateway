@@ -5,6 +5,17 @@
     <property name="LOG_PATTERN"
               value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{requestId:-}] - %msg%n"/>
 
+    <!--
+      All appenders are wrapped in AsyncAppender. Disk writes and console I/O
+      must never sit on the request thread: a slow or rotated log file would
+      otherwise add tens of milliseconds to request latency under load.
+
+      queueSize 8192 absorbs bursts; discardingThreshold 0 disables silent
+      dropping (the default drops TRACE/DEBUG/INFO once the queue is 20% full,
+      which would lose audit evidence). neverBlock=false applies backpressure
+      instead of dropping records when the queue is exhausted.
+    -->
+
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
             <pattern>${LOG_PATTERN}</pattern>
@@ -38,14 +49,53 @@
         </encoder>
     </appender>
 
-    <logger name="AUDIT" level="INFO" additivity="false">
+    <appender name="ASYNC_CONSOLE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>8192</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
         <appender-ref ref="CONSOLE"/>
-        <appender-ref ref="AUDIT_FILE"/>
-    </logger>
+    </appender>
 
-    <root level="INFO">
-        <appender-ref ref="CONSOLE"/>
+    <appender name="ASYNC_AUDIT_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>8192</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
+        <appender-ref ref="AUDIT_FILE"/>
+    </appender>
+
+    <appender name="ASYNC_APP_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>8192</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
         <appender-ref ref="APP_FILE"/>
-    </root>
+    </appender>
+
+    <!--
+      Production logs are collected from stdout by the platform or read from
+      the mounted volume. Keeping CONSOLE in prod duplicates every line through
+      a TTY, which is measurable under load, so it is dropped there and kept
+      for local and dev runs.
+    -->
+    <springProfile name="prod">
+        <logger name="AUDIT" level="INFO" additivity="false">
+            <appender-ref ref="ASYNC_AUDIT_FILE"/>
+        </logger>
+
+        <root level="INFO">
+            <appender-ref ref="ASYNC_APP_FILE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="!prod">
+        <logger name="AUDIT" level="INFO" additivity="false">
+            <appender-ref ref="ASYNC_CONSOLE"/>
+            <appender-ref ref="ASYNC_AUDIT_FILE"/>
+        </logger>
+
+        <root level="INFO">
+            <appender-ref ref="ASYNC_CONSOLE"/>
+            <appender-ref ref="ASYNC_APP_FILE"/>
+        </root>
+    </springProfile>
 
 </configuration>

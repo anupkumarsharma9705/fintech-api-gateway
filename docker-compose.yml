@@ -125,6 +125,13 @@ services:
       # OAUTH2_CLOCK_SKEW=60s
       LOG_DIR: /var/log/fintech
       TZ: UTC
+    deploy:
+      resources:
+        limits:
+          # Keep the gateway's footprint predictable so the JVM sizes its heap
+          # from MaxRAMPercentage rather than the host's total memory.
+          cpus: "2"
+          memory: 1g
     volumes:
       - gateway_logs:/var/log/fintech
     ports:

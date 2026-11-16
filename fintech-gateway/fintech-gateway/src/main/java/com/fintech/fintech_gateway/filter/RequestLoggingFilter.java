@@ -1,5 +1,6 @@
 package com.fintech.fintech_gateway.filter;
 
+import com.fintech.fintech_gateway.admission.AdmissionGate;
 import com.fintech.fintech_gateway.attack.AttackDetectionService;
 import com.fintech.fintech_gateway.attack.AttackDetectionService.AttackDetectionResult;
 import com.fintech.fintech_gateway.audit.AuditLogger;
@@ -63,6 +64,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     private static final Logger log = LoggerFactory.getLogger(RequestLoggingFilter.class);
 
     private final TrustTierService trustTierService;
+    private final AdmissionGate admissionGate;
     private final RateLimiter rateLimiter;
     private final RiskScoringEngine riskScoringEngine;
     private final RiskDecisionEngine riskDecisionEngine;
@@ -77,6 +79,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     private final GatewayMetrics metrics;
 
     public RequestLoggingFilter(TrustTierService trustTierService,
+                                AdmissionGate admissionGate,
                                 RateLimiter rateLimiter,
                                 RiskScoringEngine riskScoringEngine,
                                 RiskDecisionEngine riskDecisionEngine,
@@ -90,6 +93,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                                 GatewayProperties properties,
                                 GatewayMetrics metrics) {
         this.trustTierService = trustTierService;
+        this.admissionGate = admissionGate;
         this.rateLimiter = rateLimiter;
         this.riskScoringEngine = riskScoringEngine;
         this.riskDecisionEngine = riskDecisionEngine;
@@ -149,8 +153,13 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
         String idempotencyOwner = null;
 
         try {
-            TrustTier tier = trustTierService.getTrustTier(ip);
-            if (tier == TrustTier.BLACKLISTED) {
+            // One Redis round trip: blacklist lookup, trust-tier resolution and
+            // the sliding-window rate check execute atomically inside a single
+            // Lua script. Previously these were three serialized calls, each
+            // adding a full network round trip to every request.
+            AdmissionGate.Decision admission = admissionGate.admit(tenantId, ip, requestId, 1);
+            TrustTier tier = admission.tier();
+            if (admission.blacklisted()) {
                 reject(request, response, requestId, HttpStatus.FORBIDDEN,
                         "access_denied", "Access permanently denied.",
                         ip, method, uri, tenantId, 100, Decision.BLOCK,
@@ -158,7 +167,6 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                 return;
             }
 
-            RateLimiter.Decision admission = rateLimiter.check(tenantId, ip, tier, requestId, 1);
             applyRateLimitHeaders(response, admission);
             if (!admission.allowed()) {
                 metrics.recordRateLimited();
@@ -315,8 +323,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             }
 
             if (decision == Decision.ALLOW && status >= 200 && status < 400) {
-                trustTierService.recordGoodBehaviour(ip);
-                trustTierService.resetThrottleCount(ip);
+                trustTierService.recordSuccess(ip, tier);
             }
 
             audit(request, ip, method, uri, tenantId, requestId, riskScore, decision,
@@ -429,10 +436,22 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
 
     private void applyRateLimitHeaders(HttpServletResponse response,
                                        RateLimiter.Decision decision) {
-        response.setHeader("X-RateLimit-Limit", String.valueOf(decision.limit()));
-        response.setHeader("X-RateLimit-Remaining", String.valueOf(decision.remaining()));
-        long reset = decision.retryAfterSeconds() > 0
-                ? decision.retryAfterSeconds()
+        applyRateLimitHeaders(response, decision.limit(), decision.remaining(),
+                decision.retryAfterSeconds());
+    }
+
+    private void applyRateLimitHeaders(HttpServletResponse response,
+                                       AdmissionGate.Decision decision) {
+        applyRateLimitHeaders(response, decision.limit(), decision.remaining(),
+                decision.retryAfterSeconds());
+    }
+
+    private void applyRateLimitHeaders(HttpServletResponse response, int limit,
+                                       int remaining, long retryAfterSeconds) {
+        response.setHeader("X-RateLimit-Limit", String.valueOf(limit));
+        response.setHeader("X-RateLimit-Remaining", String.valueOf(remaining));
+        long reset = retryAfterSeconds > 0
+                ? retryAfterSeconds
                 : Math.max(1, properties.getRateLimit().getWindow().toSeconds());
         response.setHeader("X-RateLimit-Reset", String.valueOf(reset));
     }

@@ -84,7 +84,8 @@ gateway does not fix a dependency and can amplify the outage.
 | Client sees | Likely cause | Gateway state | First action |
 |---|---|---|---|
 | 503 `security_dependency_unavailable` | Redis unreachable | Liveness UP, readiness DOWN | Check `docker compose ps redis`; restore Redis; confirm readiness |
-| 503 `rate_limiter_unavailable` / `trust_store_unavailable` | Redis error/timeout | Same | Same; inspect Redis latency and memory |
+| 503 `rate_limiter_unavailable` | Redis error/timeout during blacklist, trust-tier or rate-limit admission | Liveness UP, readiness DOWN | Same; inspect Redis latency and memory. The code is retained for client-contract stability even though it now also covers the trust store |
+| 503 `trust_store_unavailable` | Redis failed during an operator trust reset | Gateway healthy | Retry the reset; inspect Redis. Automatic penalties fail soft instead |
 | 503 `upstream_unavailable` | Backend down, connect/read timeout | Gateway healthy | Check backend health and `BACKEND_URL`; check network |
 | 502 `bad_gateway` | Backend returned an unreadable response | Gateway healthy | Inspect backend logs and response framing |
 | 502 `upstream_response_too_large` | Response exceeded `MAX_UPSTREAM_RESPONSE_BYTES` | Gateway healthy | Confirm the endpoint should return that much data; raise the limit only with a memory review |
