@@ -47,3 +47,13 @@ verify-output.txt
 
 # Maven wrapper cache
 .mvn/wrapper/maven-wrapper.jar
+
+# Capacity-test artifacts.
+# Summary + meta are small and committed as evidence. Raw k6 sample dumps at
+# high request rates reach tens of MB, so they stay local or ship as a release
+# attachment instead of bloating the repository.
+load-tests/results/_warmup.json
+load-tests/results/capacity-*.json
+load-tests/results/capacity-*.prometheus.txt
+load-tests/results/capacity-*.container-stats.txt
+!load-tests/results/capacity-*.summary.json
