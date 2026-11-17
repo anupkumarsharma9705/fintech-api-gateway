@@ -130,6 +130,28 @@ class RateLimitScriptsIntegrationTest {
     }
 
     @Test
+    void gcraRefillsWithinTheWindowWhileTheSortedSetBoundStaysExact() {
+        String gcraKey = RedisKeys.quota(tenant, "gcra-refill-client");
+        for (int i = 0; i < 10; i++) {
+            assertEquals(1L, asLong(gcraSingle(gcraKey, NOW, 1_000, 10, 1).get(0)));
+        }
+        assertEquals(1L, asLong(gcraSingle(gcraKey, NOW + 100, 1_000, 10, 1).get(0)),
+                "GCRA admits one refill per emission interval inside the same window");
+
+        String ip = "203.0.113.90";
+        for (int i = 0; i < 10; i++) {
+            assertEquals(1L, asLong(sortedSetAdmission(ip, "sorted-client-a", 10, 100, i)
+                    .get(0)), "sorted-set request " + (i + 1));
+        }
+        assertEquals("QUOTA",
+                sortedSetAdmission(ip, "sorted-client-a", 10, 100, 10, NOW + 100)
+                        .get(5).toString(),
+                "the exact window refuses the refill that GCRA allows");
+        assertEquals(1L, sortedSetAdmission(ip, "sorted-client-a", 10, 100, 11, NOW + WINDOW_MS)
+                .get(0), "the whole burst expires at the window boundary");
+    }
+
+    @Test
     void combinedAdmissionHonoursBlacklistAndTrustTier() {
         redis.opsForValue().set(RedisKeys.blacklist(tenant, "203.0.113.50"), "PERMANENT");
 
@@ -222,13 +244,18 @@ class RateLimitScriptsIntegrationTest {
 
     private List<?> sortedSetAdmission(String ip, String client, int quotaLimit,
                                        int abuseLimit, int sequence) {
+        return sortedSetAdmission(ip, client, quotaLimit, abuseLimit, sequence, NOW);
+    }
+
+    private List<?> sortedSetAdmission(String ip, String client, int quotaLimit,
+                                       int abuseLimit, int sequence, long now) {
         return redis.execute(RateLimitScripts.SORTED_SET_ADMISSION,
                 List.of(
                         RedisKeys.blacklist(tenant, ip),
                         RedisKeys.trust(tenant, ip),
                         RedisKeys.quota(tenant, client),
                         RedisKeys.abuse(tenant, ip)),
-                String.valueOf(NOW), String.valueOf(WINDOW_MS),
+                String.valueOf(now), String.valueOf(WINDOW_MS),
                 String.valueOf(quotaLimit), String.valueOf(quotaLimit),
                 String.valueOf(quotaLimit), "1",
                 "member-" + sequence, "1", String.valueOf(abuseLimit));

@@ -104,7 +104,11 @@ false confidence.
 The decision above is implemented in the gateway:
 
 - `AuditSamplingPolicy` implements the deterministic request-id sample and the
-  never-sample list. The default remains `AUDIT_SAMPLE_RATE=1.0`.
+  never-sample list. The digest is salted with a random per-process value, so a
+  caller who chooses `X-Request-Id` cannot predict or steer which rows are
+  sampled; determinism is per process, which is the strongest guarantee a
+  request-id sample can give across replicas. The default remains
+  `AUDIT_SAMPLE_RATE=1.0`.
 - `AuditWriteBuffer` owns two bounded queues (critical and sampled) and one
   background writer. The request thread only calls a non-blocking `offer`; a
   full queue drops and counts the event instead of blocking the Tomcat thread.

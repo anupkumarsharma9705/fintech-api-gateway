@@ -136,11 +136,14 @@ script remains single-slot. The tag hashes the tenant id, so a brace in a tenant
 string cannot move a key into another slot.
 
 GCRA stores one theoretical-arrival-time value per bucket. The emission interval
-is `ceil(window / limit)` microseconds; a fresh bucket admits exactly `limit`
-requests and then refills one slot per interval. `RATE_THROTTLE_COST` is checked
-before it is applied, so a penalized request cannot borrow future slots. The
-`sorted-set` algorithm is retained as an exact reference and for operators who
-prefer its memory/latency trade-off; both return the same admission contract.
+is `ceil(window / limit)` microseconds; a fresh bucket admits a burst of exactly
+`limit` requests and then refills one slot per interval, so the long-run rate is
+`limit` per window. GCRA is not the same as the exact sorted-set window: after a
+full burst, the refills that follow can put up to `2*limit - 1` requests inside
+one window. That is the standard GCRA trade-off for O(1) state. Use
+`RATE_LIMIT_ALGORITHM=sorted-set` when a regulator requires at most `limit` in
+every sliding window. `RATE_THROTTLE_COST` is checked before it is applied, so a
+penalized request cannot borrow future slots.
 
 Blacklisted callers have a limit of 0 and are rejected before any bucket is
 consumed. Redis is a required dependency: an unavailable or malformed script
@@ -163,15 +166,19 @@ eligible for sampling. Every `BLOCK`, authentication/authorization failure,
 WAF detection, payment path and idempotency event is persisted at 100%,
 regardless of the configured rate.
 
-Sampling is deterministic on `X-Request-Id`: a retried request always lands on
-the same side of the sample. A missing request id is always persisted. Sampled
+Sampling is deterministic on `X-Request-Id` within one process: a retried
+request on the same instance lands on the same side of the sample. The digest is
+salted with a random per-process value, so a caller cannot predict or steer the
+selection by choosing the header. A missing request id is always persisted. Sampled
 records go to the sampled queue; everything else goes to the critical queue, so
 a flood of clean traffic cannot delay security evidence.
 
 Queue refusal is explicit backpressure: the event is dropped, counted in
 `gateway.audit.dropped{dataset,reason}`, and logged at most once every five
 seconds. The request is not blocked and is not failed. A batch that fails twice
-is dropped the same way and counted in `gateway.audit.write.failures`. At
+is dropped the same way and counted in `gateway.audit.write.failures`. Rows that
+are still buffered when the process is going down are counted with
+`reason="shutdown"` instead of only appearing in the shutdown log. At
 `AUDIT_SAMPLE_RATE=1.0` all events use the critical queue, preserving the
 pre-sampling behaviour.
 

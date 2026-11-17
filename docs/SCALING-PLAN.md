@@ -76,6 +76,11 @@ is a different project and would throw away the compliance-evidence differentiat
 
 ## 2. Ranked bottleneck inventory (from the actual code)
 
+> This inventory describes the code **before** Phases 2–5. Line numbers and
+> mechanisms such as the 30 s Caffeine trust cache and five serialized Redis
+> calls no longer exist in the current tree; the status table at the top of
+> this document records what replaced them.
+
 Each item cites where it lives and what it costs.
 
 ### B1 — Five sequential Redis round trips per request (highest structural cost)
@@ -107,9 +112,10 @@ per key, with `ZADD`/`ZCARD`/`ZREMRANGEBYSCORE` at O(log n), plus a `PEXPIRE`.
 Fine at 10 req/s. Hostile at 1,000 req/s across many tenants.
 
 **Fix:** GCRA / token bucket in a single Redis hash — O(1), constant memory,
-same exact per-request semantics (`theoretical arrival time` stored as one number).
-Keep the current ZSET implementation behind a config flag if exactness per-event is
-ever needed for audit.
+same sustained rate with a burst of `limit` (`theoretical arrival time` stored as
+one number). GCRA is not per-window exact: after a burst, refills can put up to
+`2*limit - 1` requests in one window. Keep the ZSET implementation behind a
+config flag for cases that require the exact per-event window for audit.
 
 ### B3 — Rate-limit key is `tenant + IP`
 

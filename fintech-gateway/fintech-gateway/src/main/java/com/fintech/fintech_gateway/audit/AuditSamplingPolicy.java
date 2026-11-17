@@ -12,16 +12,20 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.List;
 
 /**
  * Decides which audit events reach the durable evidence store.
  *
- * <p>Sampling is deterministic on the request id: the same request always
- * lands on the same side of the sample. Only clean ALLOW traffic is eligible.
- * Security blocks, authentication failures, attack detections, payment paths
- * and any idempotent request are always persisted. A blank request id is also
- * always persisted, because there is nothing stable to sample on.</p>
+ * <p>Sampling is deterministic on the request id within one process: the same
+ * request always lands on the same side of the sample. The digest is salted
+ * with a random per-process value, so a caller who chooses {@code X-Request-Id}
+ * cannot predict, precompute or steer the selection. Only clean ALLOW traffic
+ * is eligible. Security blocks, authentication failures, attack detections,
+ * payment paths and any idempotent request are always persisted. A blank
+ * request id is also always persisted, because there is nothing stable to
+ * sample on.</p>
  *
  * <p>At a rate of 1.0 no sampling is active and every event is written to the
  * critical dataset, keeping the previous 100% behaviour exactly.</p>
@@ -33,6 +37,8 @@ public class AuditSamplingPolicy {
 
     /** A near-zero rate is indistinguishable from disabling audit entirely. */
     static final double PROD_MIN_SAMPLE_RATE = 0.01;
+
+    private static final int SAMPLE_SALT_BYTES = 32;
 
     public enum Persistence {
         /** Always kept: security, payment, idempotency or operator event. */
@@ -49,8 +55,13 @@ public class AuditSamplingPolicy {
     private final double sampleRate;
     private final boolean sampled;
     private final List<String> neverSamplePaths;
+    private final byte[] sampleSalt;
 
     public AuditSamplingPolicy(GatewayProperties properties, Environment environment) {
+        this(properties, environment, randomSalt());
+    }
+
+    AuditSamplingPolicy(GatewayProperties properties, Environment environment, byte[] sampleSalt) {
         GatewayProperties.Audit audit = properties.getAudit();
         double configured = audit.getSampleRate();
 
@@ -70,6 +81,7 @@ public class AuditSamplingPolicy {
         this.neverSamplePaths = audit.getNeverSamplePaths() == null
                 ? List.of()
                 : List.copyOf(audit.getNeverSamplePaths());
+        this.sampleSalt = sampleSalt.clone();
     }
 
     @PostConstruct
@@ -150,6 +162,7 @@ public class AuditSamplingPolicy {
     private boolean inSample(String requestId) {
         MessageDigest digest = SHA256.get();
         digest.reset();
+        digest.update(sampleSalt);
         byte[] hash = digest.digest(requestId.getBytes(StandardCharsets.UTF_8));
 
         long value = 0;
@@ -167,5 +180,11 @@ public class AuditSamplingPolicy {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 is required by the JVM", e);
         }
+    }
+
+    private static byte[] randomSalt() {
+        byte[] salt = new byte[SAMPLE_SALT_BYTES];
+        new SecureRandom().nextBytes(salt);
+        return salt;
     }
 }

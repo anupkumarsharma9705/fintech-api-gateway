@@ -155,8 +155,9 @@ curl -sS -X POST http://localhost:8081/feedback/false-positive \
 
 `tenantId` is required and must match `TENANT_PATTERN`. The reset deletes the
 tenant-scoped `gw:v2:{t:<hash>}:blacklist:`, `blockcount:`, `throttlecount:`,
-`goodcount:` and `trust:` keys for the IP, invalidates the local tier cache,
-restores MEDIUM and writes a `trust_history` row with the tenant.
+`goodcount:` and `trust:` keys for the IP and writes a `trust_history` row with
+the tenant. There is no local trust cache to invalidate: the admission script
+reads the tier on every request, and a missing `trust:` key means MEDIUM.
 
 ```sql
 SELECT tenant_id, ip, previous_tier, new_tier, reason, timestamp
@@ -276,7 +277,8 @@ It asserts that a fresh bucket admits exactly `limit` requests, that a cost
 cannot borrow future slots, that sub-millisecond emission intervals do not
 collapse to 60,000/min, that a slot refills after one interval, that the abuse
 ceiling admits exactly its limit and not one more, and that the sorted-set
-fallback has the same contract.
+fallback enforces the exact per-window bound that GCRA deliberately trades away
+for O(1) state.
 
 ### Scale out
 
@@ -341,7 +343,8 @@ Alert on symptoms, not just resource usage:
   quota.
 - `gateway.audit.dropped{dataset,reason}` > 0 — evidence was lost. Queue-full
   means the database is too slow or the rate is above the writer's throughput;
-  write-failure means MySQL rejected a batch twice. Page before restarting.
+  write-failure means MySQL rejected a batch twice; shutdown means the writer
+  could not drain before the process stopped. Page before restarting.
 - `gateway.audit.queue.depth{dataset}` rising — the writer is behind. Compare
   with MySQL write latency before raising queue capacity.
 - `gateway.audit.write.failures` > 0 — a batch was dropped after one retry.

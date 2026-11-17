@@ -66,6 +66,8 @@ public class AuditWriteBuffer {
     private final Counter sampledDroppedFull;
     private final Counter criticalDroppedWrite;
     private final Counter sampledDroppedWrite;
+    private final Counter criticalDroppedShutdown;
+    private final Counter sampledDroppedShutdown;
 
     private final AtomicLong droppedTotal = new AtomicLong();
     private final AtomicLong lastWarnNanos = new AtomicLong();
@@ -110,6 +112,10 @@ public class AuditWriteBuffer {
                 "dataset", "critical", "reason", "write_failure");
         this.sampledDroppedWrite = counter(registry, "gateway.audit.dropped",
                 "dataset", "sampled", "reason", "write_failure");
+        this.criticalDroppedShutdown = counter(registry, "gateway.audit.dropped",
+                "dataset", "critical", "reason", "shutdown");
+        this.sampledDroppedShutdown = counter(registry, "gateway.audit.dropped",
+                "dataset", "sampled", "reason", "shutdown");
 
         Gauge.builder("gateway.audit.queue.depth", criticalQueue, BlockingQueue::size)
                 .tag("dataset", "critical")
@@ -164,11 +170,35 @@ public class AuditWriteBuffer {
             drainWithDeadline(System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
         }
         if (hasPending()) {
-            int remaining = criticalQueue.size() + sampledQueue.size();
-            droppedTotal.addAndGet(remaining);
+            int remaining = dropRemainingAtShutdown();
             log.error("Dropping {} buffered audit rows at shutdown because the database "
                     + "did not accept them in time", remaining);
         }
+    }
+
+    /**
+     * Counts rows that are still buffered when the process is going down, so
+     * evidence loss is visible in metrics instead of only in a shutdown log
+     * line. Package-visible for a deterministic test; {@link #stop()} calls it
+     * after the writer and the bounded drain have both failed to empty the
+     * queues.
+     *
+     * @return the number of rows dropped
+     */
+    int dropRemainingAtShutdown() {
+        int critical = criticalQueue.size();
+        int sampled = sampledQueue.size();
+        if (critical > 0) {
+            criticalDroppedShutdown.increment(critical);
+        }
+        if (sampled > 0) {
+            sampledDroppedShutdown.increment(sampled);
+        }
+        criticalQueue.clear();
+        sampledQueue.clear();
+        int remaining = critical + sampled;
+        droppedTotal.addAndGet(remaining);
+        return remaining;
     }
 
     private void runWriter() {

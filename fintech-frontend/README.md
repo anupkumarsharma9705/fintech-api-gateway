@@ -88,8 +88,10 @@ echo the matched signature.
 
 ### 5. Adaptive rate limiting
 
-Each request consumes one slot from an exact Redis sorted-set sliding window,
-keyed by tenant and caller IP. Limits depend on trust tier:
+Each request consumes a slot from a tenant + authenticated-client GCRA bucket,
+with a separate per-IP abuse ceiling. GCRA admits a burst of the tier limit and
+then refills steadily; set `RATE_LIMIT_ALGORITHM=sorted-set` when an exact
+per-window bound is required. Limits depend on trust tier:
 
 | Tier | Requests per minute |
 |---|---:|

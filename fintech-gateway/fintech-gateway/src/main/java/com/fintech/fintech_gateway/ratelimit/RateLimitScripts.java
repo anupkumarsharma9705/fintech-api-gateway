@@ -9,11 +9,14 @@ import java.util.List;
  *
  * <p>GCRA state is a single "theoretical arrival time" (TAT) per bucket.
  * Emission interval is {@code window / limit}; the tolerance is one emission
- * interval short of the window, so a bucket admits exactly {@code limit}
- * requests in any sliding window and then spaces requests by the emission
- * interval. That preserves the contract of the previous sorted-set
- * implementation while using O(1) memory instead of one ZSET member per
- * request.</p>
+ * interval short of the window, so a fresh bucket admits a burst of exactly
+ * {@code limit} requests and then refills one slot per interval. The long-run
+ * rate is {@code limit} per window. Unlike the sorted-set fallback, GCRA does
+ * not promise at most {@code limit} in every sliding window: a full burst plus
+ * the refills that follow it can put up to {@code 2*limit - 1} requests inside
+ * one window. That is the standard GCRA trade-off for O(1) state instead of
+ * one ZSET member per request; choose {@code sorted-set} when an exact
+ * per-window bound is required.</p>
  *
  * <p>All GCRA arithmetic is in integer microseconds. Epoch microseconds
  * (~1.8e15) are still below 2^53, so Lua's double numbers stay exact, while a

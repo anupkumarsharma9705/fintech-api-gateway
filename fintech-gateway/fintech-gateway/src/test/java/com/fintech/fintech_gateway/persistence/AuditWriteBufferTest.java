@@ -144,6 +144,30 @@ class AuditWriteBufferTest {
     }
 
     @Test
+    void rowsStillBufferedAtShutdownAreCountedNotSilentlyLost() {
+        buffer.enqueue(record("critical-one", "GET", 200), true);
+        buffer.enqueue(record("critical-two", "GET", 200), true);
+        buffer.enqueue(record("sampled-one", "GET", 200), false);
+
+        assertEquals(3, buffer.dropRemainingAtShutdown());
+
+        assertEquals(2.0, registry.counter("gateway.audit.dropped",
+                "dataset", "critical", "reason", "shutdown").count());
+        assertEquals(1.0, registry.counter("gateway.audit.dropped",
+                "dataset", "sampled", "reason", "shutdown").count());
+        assertEquals(0.0, registry.get("gateway.audit.queue.depth")
+                .tag("dataset", "critical").gauge().value()
+                + registry.get("gateway.audit.queue.depth")
+                .tag("dataset", "sampled").gauge().value(),
+                "both queues must be empty after the shutdown accounting");
+
+        // A second call must not double-count an already-drained queue.
+        assertEquals(0, buffer.dropRemainingAtShutdown());
+        assertEquals(2.0, registry.counter("gateway.audit.dropped",
+                "dataset", "critical", "reason", "shutdown").count());
+    }
+
+    @Test
     void batchSizeCapsHowManyRowsAreDrainedAtOnce() {
         properties.getAudit().setWriteBatchSize(2);
         registry = new SimpleMeterRegistry();

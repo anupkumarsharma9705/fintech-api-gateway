@@ -240,8 +240,8 @@ still operator responsibilities.
 | Request encoding | Compressed request bodies get 415; the WAF only inspects plaintext, and silently forwarding compressed bytes would bypass it |
 | Upstream response limit | `MAX_UPSTREAM_RESPONSE_BYTES` (default 10 MiB); oversized responses get 502 without unbounded buffering |
 | Idempotency | Tenant-scoped `SET NX EX` claim with a unique owner token; Lua compare-and-set/delete refuses stale owners; required on `/api/payments` |
-| Rate limiting | Tenant+client quota (GCRA by default, exact sorted-set fallback) plus tenant+IP abuse ceiling; tier limits 50/30/10/0; fail-closed |
-| Trust tiers | HIGH/MEDIUM/LOW/BLACKLISTED with Caffeine 30s cache; blacklist never cached; 4 blocks in 24h blacklists |
+| Rate limiting | Tenant+client quota (GCRA by default: a burst of the tier limit, then steady refill; sorted-set fallback for an exact per-window bound) plus tenant+IP abuse ceiling; tier limits 50/30/10/0; fail-closed |
+| Trust tiers | HIGH/MEDIUM/LOW/BLACKLISTED resolved inside the admission script; 4 blocks in 24h blacklists; state is tenant-scoped |
 | Audit sampling | Only clean 2xx ALLOW traffic is eligible; blocks, auth failures, WAF detections, payment paths and idempotent requests are always persisted; the effective rate is disclosed on every compliance response |
 | Audit persistence | Two bounded queues (critical/sampled) and one background batch writer; a full queue drops and counts instead of blocking the request |
 | Operator auth | SHA-256 + `MessageDigest.isEqual`; unset key rejects every `/feedback/**` and `/compliance/**` call; 10 failures per 15 min locks the IP out |
@@ -372,8 +372,8 @@ mvn clean verify
 ```
 
 The suite is pure JUnit 5 + Mockito and does not need Docker or a Spring
-context by default. It currently covers **346 tests** (345 gateway + 1 backend).
-Eight of the gateway tests are an opt-in real-Redis contract suite and are
+context by default. It currently covers **349 tests** (348 gateway + 1 backend).
+Nine of the gateway tests are an opt-in real-Redis contract suite and are
 reported as skipped unless enabled:
 
 ```bash
@@ -392,7 +392,8 @@ batching, audit sanitization, compliance summary/CSV bounds and formula
 neutralization, feedback, controller method allowlist and request-context
 helpers. The real-Redis suite covers what mocks cannot: exact burst size,
 cost borrowing, refill timing, sub-millisecond emission intervals,
-blacklist/trust interaction and the tenant+IP abuse ceiling.
+blacklist/trust interaction, the tenant+IP abuse ceiling and the fact that GCRA
+refills inside a window while the sorted-set fallback enforces the exact bound.
 
 MySQL and a real HTTP upstream still have **no JUnit integration suite**.
 Testcontainers was removed because Docker was unavailable in the development
@@ -424,7 +425,7 @@ capacity claim.
   sorted-set fallback for auditors who want reference semantics.
 - WAF normalization and bounded request/response buffering.
 - Durable audit schema, `client_id` attribution and Flyway migrations.
-- Deterministic audit sampling with a never-sample security list, bounded
+- Salted, deterministic audit sampling with a never-sample security list, bounded
   dual-queue buffering and a batch writer outside the request path.
 - Bounded compliance evidence summary and CSV export for operators, with
   sampling disclosed on every response and row.

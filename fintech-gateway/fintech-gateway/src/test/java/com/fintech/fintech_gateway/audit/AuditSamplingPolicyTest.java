@@ -171,6 +171,36 @@ class AuditSamplingPolicyTest {
         assertThrows(IllegalArgumentException.class, () -> policy(Double.NaN, "dev"));
     }
 
+    @Test
+    void aChosenRequestIdCannotSteerTheSampleWithoutTheSalt() {
+        byte[] saltA = new byte[32];
+        byte[] saltB = new byte[32];
+        for (int i = 0; i < saltB.length; i++) {
+            saltB[i] = (byte) (i + 1);
+        }
+        AuditSamplingPolicy first = policy(0.5, saltA);
+        AuditSamplingPolicy second = policy(0.5, saltB);
+
+        boolean differed = false;
+        for (int i = 0; i < 200 && !differed; i++) {
+            AuditEvent event = cleanAllow("chosen-request-" + i);
+            if (first.decide(event) != second.decide(event)) {
+                differed = true;
+            }
+        }
+        assertTrue(differed,
+                "the per-process salt must change a caller-chosen id's selection, "
+                        + "otherwise an attacker can precompute which reads escape the sample");
+    }
+
+    private static AuditSamplingPolicy policy(double rate, byte[] salt) {
+        GatewayProperties properties = TestProperties.defaults();
+        properties.getAudit().setSampleRate(rate);
+        MockEnvironment environment = new MockEnvironment();
+        environment.setActiveProfiles("dev");
+        return new AuditSamplingPolicy(properties, environment, salt);
+    }
+
     private static AuditSamplingPolicy policy(double rate, String... profiles) {
         GatewayProperties properties = TestProperties.defaults();
         properties.getAudit().setSampleRate(rate);
