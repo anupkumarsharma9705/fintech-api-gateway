@@ -80,14 +80,26 @@ k6 run \
 K6_EXIT=$?
 set -e
 
+# k6 exits 99 when a threshold is crossed. A saturated step is expected to
+# cross the latency budget, and that artifact is still a valid result.
+# Any other non-zero exit means the run itself failed and must not be
+# published as a measurement.
+if [[ "$K6_EXIT" -ne 0 && "$K6_EXIT" -ne 99 ]]; then
+  echo "k6 measured run failed (exit $K6_EXIT)"
+  exit 1
+fi
+if [[ ! -f load-tests/results/capacity-summary.json ]]; then
+  echo "k6 produced no summary; refusing to record meta"
+  exit 1
+fi
+
 if [[ "$COOLDOWN" -gt 0 ]]; then
   echo "==> cooldown ${COOLDOWN}s so in-flight requests drain"
   sleep "$COOLDOWN"
 fi
 
-[[ -f load-tests/results/capacity-summary.json ]] \
-  && mv -f load-tests/results/capacity-summary.json \
-     "load-tests/results/capacity-${TAG}.summary.json"
+mv -f load-tests/results/capacity-summary.json \
+   "load-tests/results/capacity-${TAG}.summary.json"
 
 docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' \
   > "load-tests/results/capacity-${TAG}.container-stats.txt"
@@ -108,6 +120,7 @@ cat > "load-tests/results/capacity-${TAG}.meta.json" <<EOF
   "hold": "${HOLD}",
   "ramp": "${RAMP}",
   "p95_budget_ms": ${P95_BUDGET},
+  "k6_exit_code": ${K6_EXIT},
   "gateway_cpus": ${GATEWAY_CPUS},
   "cooldown_s": ${COOLDOWN},
   "rate_limit_algorithm": "${RATE_LIMIT_ALGORITHM}",

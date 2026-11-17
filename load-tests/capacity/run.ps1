@@ -124,6 +124,19 @@ k6 run `
     load-tests/capacity/capacity.js
 
 $k6Exit = $LASTEXITCODE
+# k6 exits 99 when a threshold is crossed. A saturated step is expected to
+# cross the latency budget, and that artifact is still a valid result.
+# Any other non-zero exit means the run itself failed and must not be
+# published as a measurement.
+if ($k6Exit -ne 0 -and $k6Exit -ne 99) {
+    throw "k6 measured run failed (exit $k6Exit)"
+}
+
+$summaryPath = Join-Path $results 'capacity-summary.json'
+$summaryTagged = "load-tests/results/capacity-$tag.summary.json"
+if (-not (Test-Path $summaryPath)) {
+    throw 'k6 produced no summary; refusing to record meta'
+}
 
 # ---- settle -----------------------------------------------------------------
 if ($Cooldown -gt 0) {
@@ -132,9 +145,7 @@ if ($Cooldown -gt 0) {
 }
 
 # Rename the summary handleSummary wrote.
-$summaryPath = Join-Path $results 'capacity-summary.json'
-$summaryTagged = "load-tests/results/capacity-$tag.summary.json"
-if (Test-Path $summaryPath) { Move-Item -Force $summaryPath $summaryTagged }
+Move-Item -Force $summaryPath $summaryTagged
 
 # ---- evidence snapshot ------------------------------------------------------
 $dockerStats = docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}'
@@ -161,6 +172,7 @@ $meta = [ordered]@{
     hold                  = $Hold
     ramp                  = $Ramp
     p95_budget_ms         = $P95Budget
+    k6_exit_code          = $k6Exit
     gateway_cpus          = $GatewayCpus
     cooldown_s            = $Cooldown
     rate_limit_algorithm  = $RateLimitAlgorithm
