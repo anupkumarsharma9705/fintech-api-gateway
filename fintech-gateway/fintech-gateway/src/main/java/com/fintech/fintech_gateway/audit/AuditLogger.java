@@ -1,5 +1,8 @@
 package com.fintech.fintech_gateway.audit;
 
+import com.fintech.fintech_gateway.audit.AuditSamplingPolicy.Persistence;
+import com.fintech.fintech_gateway.metrics.GatewayMetrics;
+import com.fintech.fintech_gateway.persistence.AuditLogRecord;
 import com.fintech.fintech_gateway.persistence.PersistenceService;
 import com.fintech.fintech_gateway.risk.RiskDecisionEngine.Decision;
 import org.slf4j.Logger;
@@ -10,9 +13,17 @@ import java.time.Instant;
 import java.util.regex.Pattern;
 
 /**
- * Writes the security audit trail to the structured log and the database.
- * Attacker-controlled values are sanitized before logging so a crafted URI
- * cannot forge log lines or break downstream log parsers.
+ * Writes the security audit trail to the structured log and the durable
+ * evidence store.
+ *
+ * <p>The structured line is emitted for every request. The database row may be
+ * sampled for clean ALLOW traffic when {@code gateway.audit.sample-rate < 1.0};
+ * the line records {@code persisted=false} so log consumers can tell the
+ * difference. Security, payment, idempotency and operator events are never
+ * sampled.</p>
+ *
+ * <p>Attacker-controlled values are sanitized before logging so a crafted URI
+ * cannot forge log lines or break downstream log parsers.</p>
  */
 @Component
 public class AuditLogger {
@@ -23,9 +34,15 @@ public class AuditLogger {
     private static final int MAX_CLIENT_ID_LENGTH = 128;
 
     private final PersistenceService persistenceService;
+    private final AuditSamplingPolicy samplingPolicy;
+    private final GatewayMetrics metrics;
 
-    public AuditLogger(PersistenceService persistenceService) {
+    public AuditLogger(PersistenceService persistenceService,
+                       AuditSamplingPolicy samplingPolicy,
+                       GatewayMetrics metrics) {
         this.persistenceService = persistenceService;
+        this.samplingPolicy = samplingPolicy;
+        this.metrics = metrics;
     }
 
     public void log(AuditEvent event) {
@@ -36,7 +53,10 @@ public class AuditLogger {
         String clientId = truncate(sanitize(event.getClientId()), MAX_CLIENT_ID_LENGTH);
         String requestId = sanitize(event.getRequestId());
 
-        log.info("AUDIT | requestId={} | tenant={} | client={} | timestamp={} | ip={} | method={} | uri={} | riskScore={} | decision={} | attackType={} | statusCode={} | latencyMs={}",
+        Persistence persistence = samplingPolicy.decide(event);
+        boolean persisted = persistence != Persistence.SKIP;
+
+        log.info("AUDIT | requestId={} | tenant={} | client={} | timestamp={} | ip={} | method={} | uri={} | riskScore={} | decision={} | attackType={} | statusCode={} | latencyMs={} | idempotency={} | persisted={}",
                 requestId,
                 tenantId,
                 clientId,
@@ -48,10 +68,17 @@ public class AuditLogger {
                 event.getDecision(),
                 event.getAttackType() != null ? event.getAttackType() : "NONE",
                 event.getStatusCode(),
-                event.getLatencyMs());
+                event.getLatencyMs(),
+                event.isIdempotencyInvolved(),
+                persisted);
+
+        if (!persisted) {
+            metrics.recordAuditSampledOut();
+            return;
+        }
 
         try {
-            persistenceService.saveAuditLog(
+            persistenceService.saveAuditLog(new AuditLogRecord(
                     event.getTimestamp(),
                     ip,
                     method,
@@ -63,10 +90,10 @@ public class AuditLogger {
                     tenantId,
                     clientId.isEmpty() ? null : clientId,
                     requestId,
-                    event.getLatencyMs());
+                    event.getLatencyMs()),
+                    persistence == Persistence.PERSIST_CRITICAL);
         } catch (RuntimeException e) {
-            // PersistenceService already handles async failures; this guard
-            // covers executor rejection during shutdown.
+            // Enqueue is non-blocking; this guard only covers shutdown races.
             log.error("Failed to enqueue audit log", e);
         }
     }
@@ -98,6 +125,7 @@ public class AuditLogger {
         private final String clientId;
         private final String requestId;
         private final long latencyMs;
+        private final boolean idempotencyInvolved;
 
         private AuditEvent(Builder builder) {
             this.timestamp = builder.timestamp != null ? builder.timestamp : Instant.now();
@@ -112,6 +140,7 @@ public class AuditLogger {
             this.clientId = builder.clientId;
             this.requestId = builder.requestId != null ? builder.requestId : "";
             this.latencyMs = builder.latencyMs;
+            this.idempotencyInvolved = builder.idempotencyInvolved;
         }
 
         public static class Builder {
@@ -127,6 +156,7 @@ public class AuditLogger {
             private String clientId;
             private String requestId;
             private long latencyMs;
+            private boolean idempotencyInvolved;
 
             public Builder timestamp(Instant timestamp) { this.timestamp = timestamp; return this; }
             public Builder ip(String ip) { this.ip = ip; return this; }
@@ -140,6 +170,10 @@ public class AuditLogger {
             public Builder clientId(String clientId) { this.clientId = clientId; return this; }
             public Builder requestId(String requestId) { this.requestId = requestId; return this; }
             public Builder latencyMs(long latencyMs) { this.latencyMs = latencyMs; return this; }
+            public Builder idempotencyInvolved(boolean idempotencyInvolved) {
+                this.idempotencyInvolved = idempotencyInvolved;
+                return this;
+            }
             public AuditEvent build() { return new AuditEvent(this); }
         }
 
@@ -155,5 +189,6 @@ public class AuditLogger {
         public String getClientId() { return clientId; }
         public String getRequestId() { return requestId; }
         public long getLatencyMs() { return latencyMs; }
+        public boolean isIdempotencyInvolved() { return idempotencyInvolved; }
     }
 }

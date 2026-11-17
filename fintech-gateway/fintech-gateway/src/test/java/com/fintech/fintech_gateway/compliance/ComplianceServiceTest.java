@@ -2,6 +2,7 @@ package com.fintech.fintech_gateway.compliance;
 
 import com.fintech.fintech_gateway.audit.AuditLogger;
 import com.fintech.fintech_gateway.audit.AuditLogger.AuditEvent;
+import com.fintech.fintech_gateway.audit.AuditSamplingPolicy;
 import com.fintech.fintech_gateway.config.GatewayProperties;
 import com.fintech.fintech_gateway.metrics.GatewayMetrics;
 import com.fintech.fintech_gateway.persistence.entity.AuditLogEntity;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.data.domain.Pageable;
+import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
@@ -73,6 +75,8 @@ class ComplianceServiceTest {
         assertEquals(2, summary.distinctTenants());
         assertEquals(1, summary.distinctClients());
         assertEquals(2, summary.trustTierChanges());
+        assertFalse(summary.sampled());
+        assertEquals(1.0, summary.sampleRate());
         assertEquals(Map.of("ALLOW", 8L, "BLOCK", 2L), summary.decisions());
         assertEquals(Map.of("AUTHENTICATION_FAILED", 1L,
                 "RATE_LIMITED", 1L, "SQL_INJECTION", 2L), summary.attackTypes());
@@ -108,6 +112,27 @@ class ComplianceServiceTest {
 
         assertEquals(Duration.ofHours(24),
                 Duration.between(summary.from(), summary.to()));
+    }
+
+    @Test
+    void samplingIsDisclosedInSummaryAndCsv() {
+        properties.getAudit().setSampleRate(0.25);
+        service = newService(properties);
+        Instant to = Instant.now().minusSeconds(30);
+        Instant from = to.minus(Duration.ofHours(1));
+        stubEmptySummary();
+        when(auditLogRepository.findByTimestampBetweenOrderByTimestampAsc(
+                any(), any(), any(Pageable.class)))
+                .thenReturn(List.of(entity(1, "tenant-a", "client-a", "/api/account")));
+
+        ComplianceService.ComplianceSummary summary = service.summary(from, to);
+        ComplianceService.CsvExport export = service.auditCsv(from, to, 10);
+
+        assertTrue(summary.sampled());
+        assertEquals(0.25, summary.sampleRate());
+        assertTrue(export.sampled());
+        assertEquals(0.25, export.sampleRate());
+        assertTrue(export.body().contains(",0.25,true"));
     }
 
     @Test
@@ -279,15 +304,18 @@ class ComplianceServiceTest {
 
         String[] lines = csv.split("\n");
         assertEquals(2, lines.length);
-        assertEquals(13, lines[1].split(",", -1).length);
+        assertEquals(15, lines[1].split(",", -1).length);
         assertTrue(lines[1].startsWith("\"7\","));
         assertTrue(lines[1].contains("\"tenant-a\",\"client-a\""));
         assertFalse(lines[1].contains("null"));
+        assertTrue(lines[0].endsWith("sample_rate,dataset_sampled"));
+        assertTrue(lines[1].endsWith(",1.0,false"));
     }
 
     private ComplianceService newService(GatewayProperties source) {
         return new ComplianceService(auditLogRepository, trustHistoryRepository,
-                auditLogger, source, metrics);
+                auditLogger, new AuditSamplingPolicy(source, new MockEnvironment()),
+                source, metrics);
     }
 
     private void stubSummaryCounts() {

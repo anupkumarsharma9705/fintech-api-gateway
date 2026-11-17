@@ -17,6 +17,9 @@ public class TrustHistoryEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(name = "tenant_id", nullable = false, length = 64)
+    private String tenantId;
+
     @Column(nullable = false, length = 64)
     private String ip;
 
@@ -35,8 +38,9 @@ public class TrustHistoryEntity {
     public TrustHistoryEntity() {
     }
 
-    public TrustHistoryEntity(String ip, String previousTier,
+    public TrustHistoryEntity(String tenantId, String ip, String previousTier,
                               String newTier, String reason) {
+        this.tenantId = tenantId;
         this.ip = ip;
         this.previousTier = previousTier;
         this.newTier = newTier;
@@ -45,6 +49,7 @@ public class TrustHistoryEntity {
     }
 
     public Long getId() { return id; }
+    public String getTenantId() { return tenantId; }
     public String getIp() { return ip; }
     public String getPreviousTier() { return previousTier; }
     public String getNewTier() { return newTier; }

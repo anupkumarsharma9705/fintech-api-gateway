@@ -100,8 +100,9 @@ class RequestLoggingFilterTest {
                 properties,
                 new GatewayMetrics(registry));
 
-        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
-                .thenReturn(new AdmissionGate.Decision(true, TrustTier.MEDIUM, false, 30, 29, 0));
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyString(), anyInt()))
+                .thenReturn(new AdmissionGate.Decision(true, TrustTier.MEDIUM, 30, 29, 0,
+                        AdmissionGate.LimitReason.OK));
         when(rateLimiter.check(anyString(), anyString(), any(TrustTier.class), anyString(), anyInt()))
                 .thenReturn(new RateLimiter.Decision(true, 30, 29, 0));
         when(attackDetectionService.inspect(any(), any(), any()))
@@ -124,8 +125,9 @@ class RequestLoggingFilterTest {
 
     @Test
     void blacklistedCallerIsRejectedWithoutProxying() throws Exception {
-        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
-                .thenReturn(new AdmissionGate.Decision(false, TrustTier.BLACKLISTED, true, 0, 0, 0));
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyString(), anyInt()))
+                .thenReturn(new AdmissionGate.Decision(false, TrustTier.BLACKLISTED, 0, 0, 0,
+                        AdmissionGate.LimitReason.BLACKLISTED));
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
@@ -147,8 +149,9 @@ class RequestLoggingFilterTest {
 
     @Test
     void rateLimitedCallerIsRejectedWithRetryMetadata() throws Exception {
-        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
-                .thenReturn(new AdmissionGate.Decision(false, TrustTier.MEDIUM, false, 30, 0, 12));
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyString(), anyInt()))
+                .thenReturn(new AdmissionGate.Decision(false, TrustTier.MEDIUM, 30, 0, 12,
+                        AdmissionGate.LimitReason.QUOTA));
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
@@ -197,7 +200,7 @@ class RequestLoggingFilterTest {
         filter.doFilter(request, response, chain);
 
         verify(chain, never()).doFilter(any(), any());
-        verify(trustTierService).recordBlock(IP);
+        verify(trustTierService).recordBlock("default", IP);
         assertEquals(403, response.getStatus());
         assertTrue(response.getContentAsString().contains("request_rejected"));
         AuditEvent event = capturedAudit();
@@ -216,7 +219,7 @@ class RequestLoggingFilterTest {
         filter.doFilter(get("/api/account/balance"), response, chain);
 
         verify(chain, never()).doFilter(any(), any());
-        verify(trustTierService).recordBlock(IP);
+        verify(trustTierService).recordBlock("default", IP);
         assertEquals(403, response.getStatus());
         assertTrue(response.getContentAsString().contains("request_blocked"));
         AuditEvent event = capturedAudit();
@@ -241,7 +244,7 @@ class RequestLoggingFilterTest {
 
         assertTrue(invoked.get());
         assertEquals("true", response.getHeader("X-Gateway-Throttled"));
-        verify(trustTierService).recordThrottle(IP);
+        verify(trustTierService).recordThrottle("default", IP);
         verify(rateLimiter).check(anyString(), anyString(), any(TrustTier.class),
                 anyString(), eq(3));
     }
@@ -261,7 +264,7 @@ class RequestLoggingFilterTest {
         assertEquals(429, response.getStatus());
         assertEquals("7", response.getHeader("Retry-After"));
         assertTrue(response.getContentAsString().contains("throttled"));
-        verify(trustTierService).recordThrottle(IP);
+        verify(trustTierService).recordThrottle("default", IP);
         assertEquals("THROTTLE_EXCEEDED", capturedAudit().getAttackType());
     }
 
@@ -514,7 +517,7 @@ class RequestLoggingFilterTest {
 
     @Test
     void redisFailureFailsClosedWith503() throws Exception {
-        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyString(), anyInt()))
                 .thenThrow(new RedisConnectionFailureException("redis down"));
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
@@ -530,7 +533,7 @@ class RequestLoggingFilterTest {
 
     @Test
     void unexpectedPipelineFailureFailsClosedWith503() throws Exception {
-        when(admissionGate.admit(anyString(), anyString(), anyString(), anyInt()))
+        when(admissionGate.admit(anyString(), anyString(), anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("unexpected"));
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
@@ -579,7 +582,7 @@ class RequestLoggingFilterTest {
         filter.doFilter(get("/api/account/balance"), response,
                 (req, res) -> response.setStatus(200));
 
-        verify(trustTierService).recordSuccess(IP, TrustTier.MEDIUM);
+        verify(trustTierService).recordSuccess("default", IP, TrustTier.MEDIUM);
     }
 
     @Test
@@ -589,7 +592,8 @@ class RequestLoggingFilterTest {
         filter.doFilter(get("/api/account/balance"), response,
                 (req, res) -> response.setStatus(404));
 
-        verify(trustTierService, never()).recordSuccess(anyString(), any(TrustTier.class));
+        verify(trustTierService, never()).recordSuccess(anyString(), anyString(),
+                any(TrustTier.class));
     }
 
     @Test

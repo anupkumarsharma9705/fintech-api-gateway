@@ -1,6 +1,7 @@
 package com.fintech.fintech_gateway.trust;
 
 import com.fintech.fintech_gateway.persistence.PersistenceService;
+import com.fintech.fintech_gateway.redis.RedisKeys;
 import com.fintech.fintech_gateway.trust.TrustTierService.TrustTier;
 import com.fintech.fintech_gateway.web.GatewayRequestException;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +28,7 @@ import static org.mockito.Mockito.when;
 
 class TrustTierServiceTest {
 
+    private static final String TENANT = "tenant-a";
     private static final String IP = "203.0.113.10";
 
     private StringRedisTemplate redisTemplate;
@@ -47,41 +49,43 @@ class TrustTierServiceTest {
     @Test
     @SuppressWarnings("unchecked")
     void firstBlockDowngradesToLowWithShortCooldown() {
-        when(valueOperations.get("trust:" + IP)).thenReturn(null);
+        when(valueOperations.get(RedisKeys.trust(TENANT, IP))).thenReturn(null);
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenReturn(1L);
 
-        service.recordBlock(IP);
+        service.recordBlock(TENANT, IP);
 
-        verify(valueOperations).set("trust:" + IP, "LOW", Duration.ofMinutes(1));
-        verify(persistenceService).saveTrustHistory(eq(IP), eq("MEDIUM"), eq("LOW"), contains("1"));
+        verify(valueOperations).set(RedisKeys.trust(TENANT, IP), "LOW",
+                Duration.ofMinutes(1));
+        verify(persistenceService).saveTrustHistory(eq(TENANT), eq(IP), eq("MEDIUM"),
+                eq("LOW"), contains("1"));
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void fourthBlockPermanentlyBlacklists() {
-        when(valueOperations.get("trust:" + IP)).thenReturn(null);
+        when(valueOperations.get(RedisKeys.trust(TENANT, IP))).thenReturn(null);
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenReturn(4L);
 
-        service.recordBlock(IP);
+        service.recordBlock(TENANT, IP);
 
-        verify(valueOperations).set("blacklist:" + IP, "PERMANENT");
-        verify(persistenceService).saveTrustHistory(eq(IP), eq("MEDIUM"),
+        verify(valueOperations).set(RedisKeys.blacklist(TENANT, IP), "PERMANENT");
+        verify(persistenceService).saveTrustHistory(eq(TENANT), eq(IP), eq("MEDIUM"),
                 eq("BLACKLISTED"), contains("4"));
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void blockRecordingFailureIsBestEffort() {
-        when(valueOperations.get("trust:" + IP)).thenReturn(null);
+        when(valueOperations.get(RedisKeys.trust(TENANT, IP))).thenReturn(null);
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenThrow(new RedisConnectionFailureException("down"));
 
-        service.recordBlock(IP);
+        service.recordBlock(TENANT, IP);
 
         verify(persistenceService, never()).saveTrustHistory(anyString(), anyString(),
-                anyString(), anyString());
+                anyString(), anyString(), anyString());
     }
 
     @Test
@@ -90,12 +94,13 @@ class TrustTierServiceTest {
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenReturn(6L);
 
-        int count = service.recordThrottle(IP);
+        int count = service.recordThrottle(TENANT, IP);
 
         assertEquals(6, count);
-        verify(valueOperations).set("trust:" + IP, "LOW", Duration.ofMinutes(30));
-        verify(persistenceService).saveTrustHistory(eq(IP), eq("UNKNOWN"), eq("LOW"),
-                contains("6"));
+        verify(valueOperations).set(RedisKeys.trust(TENANT, IP), "LOW",
+                Duration.ofMinutes(30));
+        verify(persistenceService).saveTrustHistory(eq(TENANT), eq(IP), eq("UNKNOWN"),
+                eq("LOW"), contains("6"));
     }
 
     @Test
@@ -104,7 +109,7 @@ class TrustTierServiceTest {
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenThrow(new RedisConnectionFailureException("down"));
 
-        assertEquals(0, service.recordThrottle(IP));
+        assertEquals(0, service.recordThrottle(TENANT, IP));
     }
 
     @Test
@@ -113,11 +118,12 @@ class TrustTierServiceTest {
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenReturn(100L);
 
-        service.recordSuccess(IP, TrustTier.MEDIUM);
+        service.recordSuccess(TENANT, IP, TrustTier.MEDIUM);
 
-        verify(valueOperations).set("trust:" + IP, "HIGH", Duration.ofDays(7));
-        verify(redisTemplate).delete("goodcount:" + IP);
-        verify(persistenceService).saveTrustHistory(IP, "MEDIUM", "HIGH",
+        verify(valueOperations).set(RedisKeys.trust(TENANT, IP), "HIGH",
+                Duration.ofDays(7));
+        verify(redisTemplate).delete(RedisKeys.goodCount(TENANT, IP));
+        verify(persistenceService).saveTrustHistory(TENANT, IP, "MEDIUM", "HIGH",
                 "Sustained clean traffic");
     }
 
@@ -127,7 +133,7 @@ class TrustTierServiceTest {
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenReturn(99L);
 
-        service.recordSuccess(IP, TrustTier.MEDIUM);
+        service.recordSuccess(TENANT, IP, TrustTier.MEDIUM);
 
         verify(valueOperations, never()).set(anyString(), anyString(), any(Duration.class));
     }
@@ -138,10 +144,10 @@ class TrustTierServiceTest {
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenReturn(0L);
 
-        service.recordSuccess(IP, TrustTier.HIGH);
+        service.recordSuccess(TENANT, IP, TrustTier.HIGH);
 
         verify(persistenceService, never()).saveTrustHistory(anyString(), anyString(),
-                anyString(), anyString());
+                anyString(), anyString(), anyString());
     }
 
     @Test
@@ -150,40 +156,48 @@ class TrustTierServiceTest {
         when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenThrow(new RedisConnectionFailureException("down"));
 
-        service.recordSuccess(IP, TrustTier.MEDIUM);
+        service.recordSuccess(TENANT, IP, TrustTier.MEDIUM);
 
         verify(persistenceService, never()).saveTrustHistory(anyString(), anyString(),
-                anyString(), anyString());
+                anyString(), anyString(), anyString());
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void operatorResetClearsAllPenalties() {
-        when(valueOperations.get("trust:" + IP)).thenReturn("LOW");
+        when(valueOperations.get(RedisKeys.trust(TENANT, IP))).thenReturn("LOW");
 
-        service.resetToMedium(IP, "confirmed false positive");
+        service.resetToMedium(TENANT, IP, "confirmed false positive");
 
         verify(redisTemplate).delete(List.of(
-                "blacklist:" + IP,
-                "blockcount:" + IP,
-                "throttlecount:" + IP,
-                "goodcount:" + IP,
-                "trust:" + IP));
-        verify(persistenceService).saveTrustHistory(IP, "LOW", "MEDIUM",
+                RedisKeys.blacklist(TENANT, IP),
+                RedisKeys.blockCount(TENANT, IP),
+                RedisKeys.throttleCount(TENANT, IP),
+                RedisKeys.goodCount(TENANT, IP),
+                RedisKeys.trust(TENANT, IP)));
+        verify(persistenceService).saveTrustHistory(TENANT, IP, "LOW", "MEDIUM",
                 "confirmed false positive");
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void operatorResetFailsLoudlyWhenRedisIsDown() {
-        when(valueOperations.get("trust:" + IP)).thenReturn("LOW");
+        when(valueOperations.get(RedisKeys.trust(TENANT, IP))).thenReturn("LOW");
         when(redisTemplate.delete(anyList()))
                 .thenThrow(new RedisConnectionFailureException("down"));
 
         GatewayRequestException exception = assertThrows(GatewayRequestException.class,
-                () -> service.resetToMedium(IP, "reason"));
+                () -> service.resetToMedium(TENANT, IP, "reason"));
 
         assertEquals(503, exception.getStatus().value());
+        assertEquals("trust_store_unavailable", exception.getCode());
+    }
+
+    @Test
+    void tenantScopingSeparatesTheSameIpAcrossTenants() {
+        org.junit.jupiter.api.Assertions.assertNotEquals(
+                RedisKeys.trust("tenant-a", IP),
+                RedisKeys.trust("tenant-b", IP));
     }
 
     @Test

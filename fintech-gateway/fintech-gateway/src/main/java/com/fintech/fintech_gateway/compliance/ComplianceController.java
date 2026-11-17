@@ -54,6 +54,8 @@ public class ComplianceController {
         ComplianceService.ComplianceSummary summary = complianceService.summary(from, to);
         recordExport(request, startNanos, "summary");
         return ResponseEntity.ok()
+                .header("X-Evidence-Sampled", String.valueOf(summary.sampled()))
+                .header("X-Evidence-Sample-Rate", String.valueOf(summary.sampleRate()))
                 .cacheControl(CacheControl.noStore())
                 .body(summary);
     }
@@ -79,6 +81,8 @@ public class ComplianceController {
                         "attachment; filename=\"" + filename + "\"")
                 .header("X-Evidence-Rows", String.valueOf(export.rows()))
                 .header("X-Evidence-Truncated", String.valueOf(export.truncated()))
+                .header("X-Evidence-Sampled", String.valueOf(export.sampled()))
+                .header("X-Evidence-Sample-Rate", String.valueOf(export.sampleRate()))
                 .cacheControl(CacheControl.noStore())
                 .body(export.body());
     }

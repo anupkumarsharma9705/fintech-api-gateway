@@ -25,6 +25,7 @@ public class GatewayProperties {
     private final Proxy proxy = new Proxy();
     private final Auth auth = new Auth();
     private final Compliance compliance = new Compliance();
+    private final Audit audit = new Audit();
 
     public Backend getBackend() { return backend; }
     public Cors getCors() { return cors; }
@@ -36,6 +37,7 @@ public class GatewayProperties {
     public Proxy getProxy() { return proxy; }
     public Auth getAuth() { return auth; }
     public Compliance getCompliance() { return compliance; }
+    public Audit getAudit() { return audit; }
 
     public static class Backend {
         private String url = "http://localhost:8080";
@@ -111,6 +113,15 @@ public class GatewayProperties {
         private int lowTrustLimit = 10;
         /** Extra window slots consumed by a request the risk engine throttles. */
         private int throttleCost = 3;
+        /** {@code gcra} (default) or {@code sorted-set}. */
+        private String algorithm = "gcra";
+        /**
+         * Coarse per-tenant + per-IP abuse ceiling, independent of the
+         * tenant + client quota. It exists so one client cannot hide behind
+         * many valid credentials from a single host. It is not a quota:
+         * capacity tests must raise it rather than treating it as one.
+         */
+        private int abuseLimitPerIp = 6_000;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -124,6 +135,10 @@ public class GatewayProperties {
         public void setLowTrustLimit(int lowTrustLimit) { this.lowTrustLimit = lowTrustLimit; }
         public int getThrottleCost() { return throttleCost; }
         public void setThrottleCost(int throttleCost) { this.throttleCost = throttleCost; }
+        public String getAlgorithm() { return algorithm; }
+        public void setAlgorithm(String algorithm) { this.algorithm = algorithm; }
+        public int getAbuseLimitPerIp() { return abuseLimitPerIp; }
+        public void setAbuseLimitPerIp(int abuseLimitPerIp) { this.abuseLimitPerIp = abuseLimitPerIp; }
     }
 
     public static class Idempotency {
@@ -253,5 +268,34 @@ public class GatewayProperties {
         public void setDefaultRows(int defaultRows) { this.defaultRows = defaultRows; }
         public int getMaxRows() { return maxRows; }
         public void setMaxRows(int maxRows) { this.maxRows = maxRows; }
+    }
+
+    /**
+     * Durable audit persistence policy. Sampling only removes clean ALLOW
+     * rows; every security, payment, idempotency and operator event is kept at
+     * 100%. The effective rate is disclosed by the compliance API.
+     */
+    public static class Audit {
+        /** 1.0 keeps every row; values below 1.0 enable deterministic sampling. */
+        private double sampleRate = 1.0;
+        private List<String> neverSamplePaths = List.of(
+                "/api/payments", "/api/transfers", "/api/transactions", "/api/refunds");
+        private int criticalQueueCapacity = 20_000;
+        private int sampledQueueCapacity = 10_000;
+        private int writeBatchSize = 500;
+        private Duration writeFlushInterval = Duration.ofMillis(100);
+
+        public double getSampleRate() { return sampleRate; }
+        public void setSampleRate(double sampleRate) { this.sampleRate = sampleRate; }
+        public List<String> getNeverSamplePaths() { return neverSamplePaths; }
+        public void setNeverSamplePaths(List<String> neverSamplePaths) { this.neverSamplePaths = neverSamplePaths; }
+        public int getCriticalQueueCapacity() { return criticalQueueCapacity; }
+        public void setCriticalQueueCapacity(int criticalQueueCapacity) { this.criticalQueueCapacity = criticalQueueCapacity; }
+        public int getSampledQueueCapacity() { return sampledQueueCapacity; }
+        public void setSampledQueueCapacity(int sampledQueueCapacity) { this.sampledQueueCapacity = sampledQueueCapacity; }
+        public int getWriteBatchSize() { return writeBatchSize; }
+        public void setWriteBatchSize(int writeBatchSize) { this.writeBatchSize = writeBatchSize; }
+        public Duration getWriteFlushInterval() { return writeFlushInterval; }
+        public void setWriteFlushInterval(Duration writeFlushInterval) { this.writeFlushInterval = writeFlushInterval; }
     }
 }

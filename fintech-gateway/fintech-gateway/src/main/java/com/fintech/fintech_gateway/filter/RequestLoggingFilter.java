@@ -147,17 +147,24 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             return;
         }
 
+        // The quota is keyed on tenant + authenticated client, not IP. IP is
+        // the abuse dimension only; behind NAT it is not a client identity.
+        AuthenticatedClient client = authenticatedClient(request);
+        String clientId = client != null && StringUtils.hasText(client.clientId())
+                ? client.clientId()
+                : "anonymous";
+
         Decision decision = Decision.ALLOW;
         int riskScore = 0;
         String idempotencyKey = null;
         String idempotencyOwner = null;
 
         try {
-            // One Redis round trip: blacklist lookup, trust-tier resolution and
-            // the sliding-window rate check execute atomically inside a single
-            // Lua script. Previously these were three serialized calls, each
-            // adding a full network round trip to every request.
-            AdmissionGate.Decision admission = admissionGate.admit(tenantId, ip, requestId, 1);
+            // One Redis round trip: blacklist lookup, trust-tier resolution,
+            // tenant+client quota and tenant+IP abuse ceiling execute
+            // atomically inside a single Lua script.
+            AdmissionGate.Decision admission =
+                    admissionGate.admit(tenantId, clientId, ip, requestId, 1);
             TrustTier tier = admission.tier();
             if (admission.blacklisted()) {
                 reject(request, response, requestId, HttpStatus.FORBIDDEN,
@@ -171,10 +178,13 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             if (!admission.allowed()) {
                 metrics.recordRateLimited();
                 response.setHeader("Retry-After", String.valueOf(admission.retryAfterSeconds()));
+                boolean abuse = admission.reason() == AdmissionGate.LimitReason.ABUSE;
                 reject(request, response, requestId, HttpStatus.TOO_MANY_REQUESTS,
-                        "rate_limited", "Rate limit exceeded. Retry later.",
+                        abuse ? "abuse_limit_exceeded" : "rate_limited",
+                        abuse ? "Abuse ceiling exceeded. Retry later."
+                                : "Rate limit exceeded. Retry later.",
                         ip, method, uri, tenantId, 0, Decision.BLOCK,
-                        "RATE_LIMITED", startNanos);
+                        abuse ? "ABUSE_LIMITED" : "RATE_LIMITED", startNanos);
                 return;
             }
 
@@ -212,7 +222,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             AttackDetectionResult attack = attackDetectionService.inspect(body, uri, query);
             if (attack.isThreatDetected()) {
                 metrics.recordWafBlock(attack.getThreatType());
-                trustTierService.recordBlock(ip);
+                trustTierService.recordBlock(tenantId, ip);
                 reject(request, response, requestId, HttpStatus.FORBIDDEN,
                         "request_rejected", "Request rejected by security policy.",
                         ip, method, uri, tenantId, 100, Decision.BLOCK,
@@ -224,7 +234,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             decision = riskDecisionEngine.decide(riskScore);
 
             if (decision == Decision.BLOCK) {
-                trustTierService.recordBlock(ip);
+                trustTierService.recordBlock(tenantId, ip);
                 reject(request, response, requestId, HttpStatus.FORBIDDEN,
                         "request_blocked", "Request rejected by risk policy.",
                         ip, method, uri, tenantId, riskScore, Decision.BLOCK,
@@ -233,10 +243,10 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             }
 
             if (decision == Decision.THROTTLE) {
-                RateLimiter.Decision penalty = rateLimiter.check(tenantId, ip, tier,
+                RateLimiter.Decision penalty = rateLimiter.check(tenantId, clientId, tier,
                         requestId + ":throttle", properties.getRateLimit().getThrottleCost());
                 applyRateLimitHeaders(response, penalty);
-                trustTierService.recordThrottle(ip);
+                trustTierService.recordThrottle(tenantId, ip);
                 if (!penalty.allowed()) {
                     metrics.recordRateLimited();
                     response.setHeader("Retry-After", String.valueOf(penalty.retryAfterSeconds()));
@@ -283,7 +293,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                         response.getOutputStream().write(storedBody);
                     }
                     audit(request, ip, method, uri, tenantId, requestId, riskScore, decision,
-                            "DUPLICATE", stored.status(), startNanos);
+                            "DUPLICATE", stored.status(), true, startNanos);
                     return;
                 }
                 if (idempotency.state() == IdempotencyService.Acquisition.IN_PROGRESS) {
@@ -292,7 +302,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                             "request_in_progress",
                             "A request with this Idempotency-Key is already in progress.",
                             ip, method, uri, tenantId, riskScore, decision,
-                            "IDEMPOTENCY_IN_PROGRESS", startNanos);
+                            "IDEMPOTENCY_IN_PROGRESS", true, startNanos);
                     return;
                 }
                 idempotencyOwner = idempotency.ownerToken();
@@ -323,11 +333,11 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             }
 
             if (decision == Decision.ALLOW && status >= 200 && status < 400) {
-                trustTierService.recordSuccess(ip, tier);
+                trustTierService.recordSuccess(tenantId, ip, tier);
             }
 
             audit(request, ip, method, uri, tenantId, requestId, riskScore, decision,
-                    null, status, startNanos);
+                    null, status, idempotencyOwner != null, startNanos);
             metrics.recordRequest(decision, status, System.nanoTime() - startNanos);
 
         } catch (GatewayRequestException e) {
@@ -336,7 +346,8 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             }
             reject(request, response, requestId, e.getStatus(), e.getCode(), e.getMessage(),
                     ip, method, uri, tenantId, riskScore, Decision.BLOCK,
-                    e.getStatus().is5xxServerError() ? "SECURITY_DEPENDENCY" : null, startNanos);
+                    e.getStatus().is5xxServerError() ? "SECURITY_DEPENDENCY" : null,
+                    StringUtils.hasText(idempotencyKey), startNanos);
         } catch (DataAccessException e) {
             log.error("Security dependency failed; rejecting request {}", requestId, e);
             metrics.recordSecurityDependencyFailure();
@@ -344,14 +355,14 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                     "security_dependency_unavailable",
                     "Security checks are temporarily unavailable. Retry shortly.",
                     ip, method, uri, tenantId, riskScore, Decision.BLOCK,
-                    "SECURITY_DEPENDENCY", startNanos);
+                    "SECURITY_DEPENDENCY", StringUtils.hasText(idempotencyKey), startNanos);
         } catch (Exception e) {
             log.error("Gateway pipeline failed; rejecting request {}", requestId, e);
             reject(request, response, requestId, HttpStatus.SERVICE_UNAVAILABLE,
                     "gateway_unavailable",
                     "The gateway could not safely process the request. Retry shortly.",
                     ip, method, uri, tenantId, riskScore, Decision.BLOCK,
-                    "GATEWAY_ERROR", startNanos);
+                    "GATEWAY_ERROR", StringUtils.hasText(idempotencyKey), startNanos);
         }
     }
 
@@ -402,17 +413,27 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                         String ip, String method, String uri, String tenantId,
                         int riskScore, Decision decision, String attackType,
                         long startNanos) throws IOException {
+        reject(request, response, requestId, status, code, message, ip, method, uri,
+                tenantId, riskScore, decision, attackType, false, startNanos);
+    }
+
+    private void reject(HttpServletRequest request, HttpServletResponse response,
+                        String requestId, HttpStatus status, String code, String message,
+                        String ip, String method, String uri, String tenantId,
+                        int riskScore, Decision decision, String attackType,
+                        boolean idempotencyInvolved, long startNanos) throws IOException {
         if (!response.isCommitted()) {
             errorResponseWriter.write(response, status, code, message, requestId);
         }
         metrics.recordRequest(decision, status.value(), System.nanoTime() - startNanos);
         audit(request, ip, method, uri, tenantId, requestId, riskScore, decision,
-                attackType, status.value(), startNanos);
+                attackType, status.value(), idempotencyInvolved, startNanos);
     }
 
     private void audit(HttpServletRequest request, String ip, String method, String uri,
                        String tenantId, String requestId, int riskScore, Decision decision,
-                       String attackType, int statusCode, long startNanos) {
+                       String attackType, int statusCode, boolean idempotencyInvolved,
+                       long startNanos) {
         AuthenticatedClient client = authenticatedClient(request);
         auditLogger.log(new AuditEvent.Builder()
                 .ip(ip)
@@ -426,6 +447,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                 .attackType(attackType)
                 .statusCode(statusCode)
                 .latencyMs(elapsedMillis(startNanos))
+                .idempotencyInvolved(idempotencyInvolved)
                 .build());
     }
 

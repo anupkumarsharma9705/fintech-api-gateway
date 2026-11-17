@@ -1,6 +1,7 @@
 package com.fintech.fintech_gateway.trust;
 
 import com.fintech.fintech_gateway.persistence.PersistenceService;
+import com.fintech.fintech_gateway.redis.RedisKeys;
 import com.fintech.fintech_gateway.web.GatewayRequestException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,26 +18,25 @@ import java.util.List;
 /**
  * Adaptive trust tiers backed by Redis.
  *
- * <p>The admission read path lives in {@code AdmissionGate}, which resolves the
- * blacklist and tier inside the same Lua call as the rate-limit check so a
- * request never pays for separate round trips. This service owns the writes:
- * penalties (blocks, throttles) and the asynchronous clean-traffic counter.</p>
+ * <p>Trust is scoped to tenant + caller IP. The same address can be a clean
+ * customer in one tenant and a repeat offender in another, so a global
+ * per-IP tier was both a false-positive source and a cross-tenant signal
+ * leak.</p>
  *
- * <p>Writes are best-effort because the request decision has already been made;
- * failures are logged and the durable audit trail still records the security
- * event. Operator resets fail loudly instead, because an operator must know the
- * reset did not apply.</p>
+ * <p>The admission read path lives in {@code AdmissionGate}, which resolves the
+ * blacklist and tier inside the same Lua call as the rate-limit check. This
+ * service owns the writes: penalties (blocks, throttles) and the asynchronous
+ * clean-traffic counter.</p>
+ *
+ * <p>Writes are best-effort because the request decision has already been
+ * made; failures are logged and the durable audit trail still records the
+ * security event. Operator resets fail loudly instead, because an operator
+ * must know the reset did not apply.</p>
  */
 @Service
 public class TrustTierService {
 
     private static final Logger log = LoggerFactory.getLogger(TrustTierService.class);
-
-    private static final String TRUST_KEY = "trust:";
-    private static final String BLOCK_COUNT_KEY = "blockcount:";
-    private static final String BLACKLIST_KEY = "blacklist:";
-    private static final String THROTTLE_COUNT_KEY = "throttlecount:";
-    private static final String GOOD_COUNT_KEY = "goodcount:";
 
     private static final int BLACKLIST_THRESHOLD = 4;
     private static final int GOOD_BEHAVIOUR_THRESHOLD = 100;
@@ -87,29 +87,35 @@ public class TrustTierService {
         this.persistenceService = persistenceService;
     }
 
-    public void recordBlock(String ip) {
+    public void recordBlock(String tenantId, String ip) {
         try {
-            TrustTier previous = currentTierBestEffort(ip);
-            Long blockCount = incrementWithTtl(BLOCK_COUNT_KEY + ip, BLOCK_WINDOW);
+            TrustTier previous = currentTierBestEffort(tenantId, ip);
+            Long blockCount = incrementWithTtl(RedisKeys.blockCount(tenantId, ip), BLOCK_WINDOW);
             if (blockCount == null) {
                 return;
             }
             if (blockCount >= BLACKLIST_THRESHOLD) {
-                redisTemplate.opsForValue().set(BLACKLIST_KEY + ip, "PERMANENT");
-                persistenceService.saveTrustHistory(ip, previous.name(), TrustTier.BLACKLISTED.name(),
+                redisTemplate.opsForValue()
+                        .set(RedisKeys.blacklist(tenantId, ip), "PERMANENT");
+                persistenceService.saveTrustHistory(tenantId, ip, previous.name(),
+                        TrustTier.BLACKLISTED.name(),
                         "Blocked " + blockCount + " times within 24 hours");
-                log.warn("IP {} permanently blacklisted after {} blocks", ip, blockCount);
+                log.warn("IP {} permanently blacklisted in tenant {} after {} blocks",
+                        ip, tenantId, blockCount);
             } else {
                 Duration cooldown = cooldownFor(blockCount.intValue());
-                redisTemplate.opsForValue().set(TRUST_KEY + ip, TrustTier.LOW.name(), cooldown);
-                persistenceService.saveTrustHistory(ip, previous.name(), TrustTier.LOW.name(),
+                redisTemplate.opsForValue()
+                        .set(RedisKeys.trust(tenantId, ip), TrustTier.LOW.name(), cooldown);
+                persistenceService.saveTrustHistory(tenantId, ip, previous.name(),
+                        TrustTier.LOW.name(),
                         "Blocked " + blockCount + " times; cooldown " + cooldown);
-                log.info("IP {} downgraded to LOW trust for {}", ip, cooldown);
+                log.info("IP {} downgraded to LOW trust in tenant {} for {}",
+                        ip, tenantId, cooldown);
             }
         } catch (RuntimeException e) {
             // The request was already blocked; failing to persist the
             // downgrade must not change that decision.
-            log.error("Failed to record block for {}", ip, e);
+            log.error("Failed to record block for tenant {} ip {}", tenantId, ip, e);
         }
     }
 
@@ -122,23 +128,26 @@ public class TrustTierService {
      * script already resolved it. Re-reading it would add another round trip
      * and could observe a tier change that happened after the decision.</p>
      */
-    @Async("auditExecutor")
-    public void recordSuccess(String ip, TrustTier tier) {
+    @Async("trustExecutor")
+    public void recordSuccess(String tenantId, String ip, TrustTier tier) {
         try {
             Long goodCount = redisTemplate.execute(RECORD_SUCCESS,
-                    List.of(GOOD_COUNT_KEY + ip, THROTTLE_COUNT_KEY + ip),
+                    List.of(RedisKeys.goodCount(tenantId, ip),
+                            RedisKeys.throttleCount(tenantId, ip)),
                     tier.name(),
                     String.valueOf(GOOD_BEHAVIOUR_WINDOW.toSeconds()));
             if (goodCount != null && goodCount >= GOOD_BEHAVIOUR_THRESHOLD) {
                 redisTemplate.opsForValue()
-                        .set(TRUST_KEY + ip, TrustTier.HIGH.name(), HIGH_TRUST_TTL);
-                redisTemplate.delete(GOOD_COUNT_KEY + ip);
-                persistenceService.saveTrustHistory(ip, TrustTier.MEDIUM.name(), TrustTier.HIGH.name(),
+                        .set(RedisKeys.trust(tenantId, ip), TrustTier.HIGH.name(), HIGH_TRUST_TTL);
+                redisTemplate.delete(RedisKeys.goodCount(tenantId, ip));
+                persistenceService.saveTrustHistory(tenantId, ip,
+                        TrustTier.MEDIUM.name(), TrustTier.HIGH.name(),
                         "Sustained clean traffic");
-                log.info("IP {} upgraded to HIGH trust", ip);
+                log.info("IP {} upgraded to HIGH trust in tenant {}", ip, tenantId);
             }
         } catch (RuntimeException e) {
-            log.error("Failed to record successful request for {}", ip, e);
+            log.error("Failed to record successful request for tenant {} ip {}",
+                    tenantId, ip, e);
         }
     }
 
@@ -146,48 +155,55 @@ public class TrustTierService {
      * Records a throttle event and downgrades repeat offenders. Returns the
      * number of throttle events in the current window.
      */
-    public int recordThrottle(String ip) {
+    public int recordThrottle(String tenantId, String ip) {
         try {
-            Long count = incrementWithTtl(THROTTLE_COUNT_KEY + ip, THROTTLE_WINDOW);
+            Long count = incrementWithTtl(
+                    RedisKeys.throttleCount(tenantId, ip), THROTTLE_WINDOW);
             if (count == null) {
                 return 0;
             }
             if (count >= THROTTLE_DEGRADE_THRESHOLD) {
                 redisTemplate.opsForValue()
-                        .set(TRUST_KEY + ip, TrustTier.LOW.name(), Duration.ofMinutes(30));
-                persistenceService.saveTrustHistory(ip, "UNKNOWN", TrustTier.LOW.name(),
+                        .set(RedisKeys.trust(tenantId, ip), TrustTier.LOW.name(),
+                                Duration.ofMinutes(30));
+                persistenceService.saveTrustHistory(tenantId, ip, "UNKNOWN",
+                        TrustTier.LOW.name(),
                         "Repeated throttle violations: " + count);
-                log.info("IP {} downgraded to LOW trust after {} throttles", ip, count);
+                log.info("IP {} downgraded to LOW trust in tenant {} after {} throttles",
+                        ip, tenantId, count);
             }
             return count.intValue();
         } catch (RuntimeException e) {
-            log.error("Failed to record throttle for {}", ip, e);
+            log.error("Failed to record throttle for tenant {} ip {}", tenantId, ip, e);
             return 0;
         }
     }
 
     /**
-     * Operator action: clears every gateway penalty for an IP and restores
-     * the default MEDIUM trust tier. Unlike the automatic writes above this
-     * fails loudly, because an operator must know the reset did not apply.
+     * Operator action: clears every gateway penalty for a tenant + IP and
+     * restores the default MEDIUM trust tier. Unlike the automatic writes
+     * above this fails loudly, because an operator must know the reset did not
+     * apply.
      */
-    public void resetToMedium(String ip, String reason) {
-        TrustTier previous = currentTierBestEffort(ip);
+    public void resetToMedium(String tenantId, String ip, String reason) {
+        TrustTier previous = currentTierBestEffort(tenantId, ip);
         try {
             redisTemplate.delete(List.of(
-                    BLACKLIST_KEY + ip,
-                    BLOCK_COUNT_KEY + ip,
-                    THROTTLE_COUNT_KEY + ip,
-                    GOOD_COUNT_KEY + ip,
-                    TRUST_KEY + ip));
+                    RedisKeys.blacklist(tenantId, ip),
+                    RedisKeys.blockCount(tenantId, ip),
+                    RedisKeys.throttleCount(tenantId, ip),
+                    RedisKeys.goodCount(tenantId, ip),
+                    RedisKeys.trust(tenantId, ip)));
         } catch (DataAccessException e) {
-            log.error("Failed to reset trust state for {}", ip, e);
+            log.error("Failed to reset trust state for tenant {} ip {}", tenantId, ip, e);
             throw new GatewayRequestException(HttpStatus.SERVICE_UNAVAILABLE,
                     "trust_store_unavailable",
                     "Trust state could not be reset. Retry shortly.");
         }
-        persistenceService.saveTrustHistory(ip, previous.name(), TrustTier.MEDIUM.name(), reason);
-        log.info("Trust state reset to MEDIUM for {} ({})", ip, reason);
+        persistenceService.saveTrustHistory(tenantId, ip, previous.name(),
+                TrustTier.MEDIUM.name(), reason);
+        log.info("Trust state reset to MEDIUM for tenant {} ip {} ({})",
+                tenantId, ip, reason);
     }
 
     public int getRiskAdjustment(TrustTier tier) {
@@ -204,9 +220,9 @@ public class TrustTierService {
                 String.valueOf(ttl.toSeconds()));
     }
 
-    private TrustTier currentTierBestEffort(String ip) {
+    private TrustTier currentTierBestEffort(String tenantId, String ip) {
         try {
-            return parseTier(redisTemplate.opsForValue().get(TRUST_KEY + ip));
+            return parseTier(redisTemplate.opsForValue().get(RedisKeys.trust(tenantId, ip)));
         } catch (RuntimeException e) {
             return TrustTier.MEDIUM;
         }

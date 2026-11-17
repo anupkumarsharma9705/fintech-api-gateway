@@ -1,10 +1,12 @@
 package com.fintech.fintech_gateway.ratelimit;
 
+import com.fintech.fintech_gateway.redis.RedisKeys;
 import com.fintech.fintech_gateway.support.TestProperties;
 import com.fintech.fintech_gateway.trust.TrustTierService.TrustTier;
 import com.fintech.fintech_gateway.web.GatewayRequestException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -113,6 +115,45 @@ class RateLimiterTest {
 
         assertTrue(decision.allowed());
         verify(redisTemplate, never()).execute(any(RedisScript.class), anyList(), any(Object[].class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void quotaKeyIsTenantAndClientScoped() {
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenReturn(List.of(1L, 9L, 0L));
+
+        rateLimiter.check("tenant-a", "client-9", TrustTier.MEDIUM, "req-1", 1);
+
+        ArgumentCaptor<List<String>> keys = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
+        verify(redisTemplate).execute(any(RedisScript.class), keys.capture(), args.capture());
+
+        assertEquals(List.of(RedisKeys.quota("tenant-a", "client-9")), keys.getValue());
+        assertEquals("60000", args.getValue()[1]);
+        assertEquals("30", args.getValue()[2]);
+        assertEquals("1", args.getValue()[3]);
+        assertEquals(4, args.getValue().length, "GCRA single-bucket takes no member");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sortedSetAlgorithmPassesTheRequestMember() {
+        var properties = TestProperties.defaults();
+        properties.getRateLimit().setAlgorithm("sorted-set");
+        RateLimiter sortedSet = new RateLimiter(redisTemplate, properties,
+                Clock.fixed(Instant.parse("2026-01-15T10:00:00Z"), ZoneOffset.UTC));
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenReturn(List.of(1L, 9L, 0L));
+
+        sortedSet.check("tenant-a", "client-9", TrustTier.MEDIUM, "req-1", 3);
+
+        ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
+        verify(redisTemplate).execute(any(RedisScript.class), anyList(), args.capture());
+        assertEquals("req-1:" + Instant.parse("2026-01-15T10:00:00Z").toEpochMilli(),
+                args.getValue()[3]);
+        assertEquals("3", args.getValue()[4]);
+        assertEquals(RateLimitAlgorithm.SORTED_SET, sortedSet.algorithm());
     }
 
     @Test

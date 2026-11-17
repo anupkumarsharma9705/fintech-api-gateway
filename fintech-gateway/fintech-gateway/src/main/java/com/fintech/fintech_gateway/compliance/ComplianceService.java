@@ -2,6 +2,7 @@ package com.fintech.fintech_gateway.compliance;
 
 import com.fintech.fintech_gateway.audit.AuditLogger;
 import com.fintech.fintech_gateway.audit.AuditLogger.AuditEvent;
+import com.fintech.fintech_gateway.audit.AuditSamplingPolicy;
 import com.fintech.fintech_gateway.config.GatewayProperties;
 import com.fintech.fintech_gateway.metrics.GatewayMetrics;
 import com.fintech.fintech_gateway.persistence.entity.AuditLogEntity;
@@ -46,7 +47,7 @@ public class ComplianceService {
             "AUTHENTICATION_FAILED", "INSUFFICIENT_SCOPE", "INVALID_TOKEN_CLAIMS");
 
     private static final Set<String> RATE_LIMIT_TYPES = Set.of(
-            "RATE_LIMITED", "THROTTLE_EXCEEDED");
+            "RATE_LIMITED", "THROTTLE_EXCEEDED", "ABUSE_LIMITED");
 
     private static final Set<String> IDEMPOTENCY_REPLAY_TYPES = Set.of("DUPLICATE");
 
@@ -58,11 +59,13 @@ public class ComplianceService {
 
     private static final String CSV_HEADER =
             "id,timestamp,tenant_id,client_id,ip,method,uri,decision,"
-                    + "risk_score,attack_type,status_code,latency_ms,request_id\n";
+                    + "risk_score,attack_type,status_code,latency_ms,request_id,"
+                    + "sample_rate,dataset_sampled\n";
 
     private final AuditLogRepository auditLogRepository;
     private final TrustHistoryRepository trustHistoryRepository;
     private final AuditLogger auditLogger;
+    private final AuditSamplingPolicy samplingPolicy;
     private final GatewayMetrics metrics;
     private final Duration defaultWindow;
     private final Duration maxWindow;
@@ -72,11 +75,13 @@ public class ComplianceService {
     public ComplianceService(AuditLogRepository auditLogRepository,
                              TrustHistoryRepository trustHistoryRepository,
                              AuditLogger auditLogger,
+                             AuditSamplingPolicy samplingPolicy,
                              GatewayProperties properties,
                              GatewayMetrics metrics) {
         this.auditLogRepository = auditLogRepository;
         this.trustHistoryRepository = trustHistoryRepository;
         this.auditLogger = auditLogger;
+        this.samplingPolicy = samplingPolicy;
         this.metrics = metrics;
         this.defaultWindow = properties.getCompliance().getDefaultWindow();
         this.maxWindow = properties.getCompliance().getMaxWindow();
@@ -143,6 +148,8 @@ public class ComplianceService {
                 window.from(),
                 window.to(),
                 ATTESTATION,
+                samplingPolicy.isSampled(),
+                samplingPolicy.getSampleRate(),
                 totalRequests,
                 decisions.getOrDefault("ALLOW", 0L),
                 decisions.getOrDefault("THROTTLE", 0L),
@@ -175,6 +182,8 @@ public class ComplianceService {
 
         StringBuilder csv = new StringBuilder(CSV_HEADER.length() + rows.size() * 256);
         csv.append(CSV_HEADER);
+        String sampleRate = String.valueOf(samplingPolicy.getSampleRate());
+        boolean sampled = samplingPolicy.isSampled();
         for (AuditLogEntity row : rows) {
             csv.append(csv(row.getId()))
                     .append(',').append(csv(row.getTimestamp()))
@@ -189,10 +198,12 @@ public class ComplianceService {
                     .append(',').append(row.getStatusCode())
                     .append(',').append(row.getLatencyMs())
                     .append(',').append(csv(row.getRequestId()))
+                    .append(',').append(sampleRate)
+                    .append(',').append(sampled)
                     .append('\n');
         }
         return new CsvExport(csv.toString(), rows.size(), truncated,
-                window.from(), window.to());
+                window.from(), window.to(), sampled, samplingPolicy.getSampleRate());
     }
 
     /**
@@ -296,6 +307,8 @@ public class ComplianceService {
                                     Instant from,
                                     Instant to,
                                     String attestation,
+                                    boolean sampled,
+                                    double sampleRate,
                                     long totalRequests,
                                     long allowedRequests,
                                     long throttledRequests,
@@ -314,6 +327,7 @@ public class ComplianceService {
     }
 
     public record CsvExport(String body, int rows, boolean truncated,
-                            Instant from, Instant to) {
+                            Instant from, Instant to,
+                            boolean sampled, double sampleRate) {
     }
 }

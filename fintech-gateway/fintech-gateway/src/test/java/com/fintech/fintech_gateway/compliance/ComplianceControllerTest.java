@@ -47,6 +47,7 @@ class ComplianceControllerTest {
         Instant to = Instant.parse("2026-05-01T11:00:00Z");
         ComplianceSummary summary = new ComplianceSummary(
                 Instant.now(), from, to, "attestation",
+                false, 1.0,
                 10, 8, 0, 2, 2, 1, 0, 1, 2, 1, 2,
                 Map.of("ALLOW", 8L, "BLOCK", 2L),
                 Map.of("SQL_INJECTION", 2L, "RATE_LIMITED", 1L),
@@ -61,6 +62,8 @@ class ComplianceControllerTest {
 
         assertEquals(200, response.getStatusCode().value());
         assertSame(summary, response.getBody());
+        assertEquals("false", response.getHeaders().getFirst("X-Evidence-Sampled"));
+        assertEquals("1.0", response.getHeaders().getFirst("X-Evidence-Sample-Rate"));
         assertEquals("no-store", response.getHeaders().getCacheControl());
         verify(complianceService).recordExport(any(), any(), any(), any(), anyLong(), any());
     }
@@ -71,7 +74,7 @@ class ComplianceControllerTest {
         Instant to = Instant.parse("2026-05-01T11:00:00Z");
         String csvBody = "\"id\",\"timestamp\",\"tenant_id\",\"client_id\",\"ip\",\"method\",\"uri\",\"decision\",\"risk_score\",\"attack_type\",\"status_code\",\"latency_ms\",\"request_id\"\n" +
                 "\"1\",\"2026-05-01T10:00:00Z\",\"tenant-a\",\"client-a\",\"203.0.113.5\",\"POST\",\"/api/payments\",\"ALLOW\",\"10\",\"\",\"200\",\"5\",\"req-1\"\n";
-        CsvExport export = new CsvExport(csvBody, 1, false, from, to);
+        CsvExport export = new CsvExport(csvBody, 1, false, from, to, false, 1.0);
         when(complianceService.auditCsv(from, to, 50)).thenReturn(export);
         MockHttpServletRequest request = request("GET", "/compliance/evidence/audit.csv");
         request.addParameter("from", "2026-05-01T10:00:00Z");
@@ -87,13 +90,15 @@ class ComplianceControllerTest {
                         + "-" + to.toEpochMilli() + ".csv"));
         assertEquals("1", response.getHeaders().getFirst("X-Evidence-Rows"));
         assertEquals("false", response.getHeaders().getFirst("X-Evidence-Truncated"));
+        assertEquals("false", response.getHeaders().getFirst("X-Evidence-Sampled"));
+        assertEquals("1.0", response.getHeaders().getFirst("X-Evidence-Sample-Rate"));
         assertEquals("no-store", response.getHeaders().getCacheControl());
     }
 
     @Test
     void defaultWindowAndRowLimitAreUsedWhenParametersAreOmitted() throws Exception {
         CsvExport export = new CsvExport("header\nbody\n", 1, false,
-                Instant.now().minusSeconds(3600), Instant.now());
+                Instant.now().minusSeconds(3600), Instant.now(), false, 1.0);
         when(complianceService.auditCsv(any(), any(), any())).thenReturn(export);
         MockHttpServletRequest request = request("GET", "/compliance/evidence/audit.csv");
 

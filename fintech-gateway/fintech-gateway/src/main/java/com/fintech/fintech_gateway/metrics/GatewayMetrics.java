@@ -66,4 +66,8 @@ public class GatewayMetrics {
         registry.counter("gateway.compliance.export",
                 "type", type == null ? "unknown" : type).increment();
     }
+
+    public void recordAuditSampledOut() {
+        registry.counter("gateway.audit.sampled_out").increment();
+    }
 }

@@ -28,18 +28,25 @@ public class FeedbackController {
     }
 
     @PostMapping("/false-positive")
-    @Operation(summary = "Clear gateway penalties for an IP after a confirmed false positive")
+    @Operation(summary = "Clear gateway penalties for a tenant + IP after a confirmed false positive")
     public ResponseEntity<Map<String, String>> reportFalsePositive(
             @Valid @RequestBody FeedbackRequest request) {
-        feedbackService.handleFalsePositive(request.getIp(), request.getReason());
+        feedbackService.handleFalsePositive(
+                request.getTenantId(), request.getIp(), request.getReason());
         return ResponseEntity.ok(Map.of(
                 "status", "resolved",
+                "tenant", request.getTenantId(),
                 "ip", request.getIp(),
-                "message", "IP trust tier reset to MEDIUM"
+                "message", "IP trust tier reset to MEDIUM for tenant "
+                        + request.getTenantId()
         ));
     }
 
     public static class FeedbackRequest {
+        @NotBlank
+        @Size(max = 64)
+        private String tenantId;
+
         @NotBlank
         @Size(max = 64)
         private String ip;
@@ -47,6 +54,8 @@ public class FeedbackController {
         @Size(max = 400)
         private String reason;
 
+        public String getTenantId() { return tenantId; }
+        public void setTenantId(String tenantId) { this.tenantId = tenantId; }
         public String getIp() { return ip; }
         public void setIp(String ip) { this.ip = ip; }
         public String getReason() { return reason; }
