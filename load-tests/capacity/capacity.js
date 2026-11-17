@@ -33,6 +33,10 @@ const RATE = Number(__ENV.RATE || 200);
 const RAMP = __ENV.RAMP || '20s';
 const HOLD = __ENV.HOLD || '120s';
 const P95_BUDGET = Number(__ENV.P95_BUDGET || 50);
+// Warmup runs burn JIT and connection pools; their summary must not overwrite
+// the artifact from the measured run. k6 v2 removed --no-summary, so the
+// script itself decides whether to emit one.
+const WARMUP = __ENV.WARMUP === 'true';
 
 const ok = new Counter('cap_ok');
 const blocked = new Counter('cap_blocked');
@@ -164,6 +168,8 @@ export default function () {
 }
 
 export function handleSummary(data) {
+  if (WARMUP) return {};
+
   const m = data.metrics;
   const dur = m.http_req_duration ? m.http_req_duration.values : {};
   const summary = {

@@ -16,6 +16,14 @@ RAMP="${5:-20s}"
 P95_BUDGET="${P95_BUDGET:-50}"
 GATEWAY_CPUS="${GATEWAY_CPUS:-2}"
 COOLDOWN="${COOLDOWN:-60}"
+AUDIT_SAMPLE_RATE="${AUDIT_SAMPLE_RATE:-1.0}"
+RATE_LIMIT_ALGORITHM="${RATE_LIMIT_ALGORITHM:-gcra}"
+ABUSE_LIMIT_PER_IP="${RATE_ABUSE_LIMIT_PER_IP:-}"
+
+[[ "$AUDIT_SAMPLE_RATE" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] \
+  || { echo "AUDIT_SAMPLE_RATE must be within [0,1], got '$AUDIT_SAMPLE_RATE'"; exit 1; }
+[[ "$RATE_LIMIT_ALGORITHM" =~ ^(gcra|sorted-set)$ ]] \
+  || { echo "RATE_LIMIT_ALGORITHM must be gcra or sorted-set, got '$RATE_LIMIT_ALGORITHM'"; exit 1; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
@@ -29,7 +37,15 @@ if [[ "$MODE" == "saturated" ]]; then
 else
   export RATE_HIGH_TRUST=50 RATE_MEDIUM_TRUST=30 RATE_LOW_TRUST=10
 fi
+
+if [[ -z "$ABUSE_LIMIT_PER_IP" ]]; then
+  if [[ "$MODE" == "saturated" ]]; then ABUSE_LIMIT_PER_IP=100000000; else ABUSE_LIMIT_PER_IP=6000; fi
+fi
+export RATE_ABUSE_LIMIT_PER_IP="$ABUSE_LIMIT_PER_IP"
+export AUDIT_SAMPLE_RATE RATE_LIMIT_ALGORITHM
 export GATEWAY_CPUS
+
+echo "==> admission: algorithm=$RATE_LIMIT_ALGORITHM sample_rate=$AUDIT_SAMPLE_RATE abuse_per_ip=$ABUSE_LIMIT_PER_IP"
 
 COMPOSE=(-f docker-compose.yml -f docker-compose.loadtest.yml)
 
@@ -47,11 +63,11 @@ curl -fsS -o /dev/null "http://localhost:8081/actuator/health/readiness" \
   || { echo "gateway not ready"; docker compose "${COMPOSE[@]}" logs --tail 100 gateway; exit 1; }
 
 echo "==> warmup (10s, discarded)"
-k6 run --quiet --no-summary \
+k6 run --quiet \
   -e "SCENARIO=$SCENARIO" -e "RATE=100" -e "RAMP=5s" -e "HOLD=10s" \
-  -e "P95_BUDGET=10000" \
+  -e "P95_BUDGET=10000" -e "WARMUP=true" \
   -o "json=load-tests/results/_warmup.json" \
-  load-tests/capacity/capacity.js >/dev/null 2>&1 || true
+  load-tests/capacity/capacity.js >/dev/null
 
 echo "==> measured run: $SCENARIO @ ${RATE} req/s for $HOLD"
 JSON_OUT="load-tests/results/capacity-${TAG}.json"
@@ -81,7 +97,7 @@ curl -fsS "http://localhost:8081/actuator/prometheus" \
 
 GIT_SHA="$(git rev-parse HEAD)"
 GIT_DIRTY=false
-[[ -n "$(git status --porcelain)" ]] && GIT_DIRTY=true
+[[ -n "$(git status --porcelain -- ':!load-tests/results')" ]] && GIT_DIRTY=true
 
 cat > "load-tests/results/capacity-${TAG}.meta.json" <<EOF
 {
@@ -94,6 +110,9 @@ cat > "load-tests/results/capacity-${TAG}.meta.json" <<EOF
   "p95_budget_ms": ${P95_BUDGET},
   "gateway_cpus": ${GATEWAY_CPUS},
   "cooldown_s": ${COOLDOWN},
+  "rate_limit_algorithm": "${RATE_LIMIT_ALGORITHM}",
+  "audit_sample_rate": ${AUDIT_SAMPLE_RATE},
+  "rate_abuse_limit_per_ip": ${ABUSE_LIMIT_PER_IP},
   "git_sha": "${GIT_SHA}",
   "git_dirty": ${GIT_DIRTY},
   "host_os": "$(uname -srm)",

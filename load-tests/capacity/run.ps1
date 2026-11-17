@@ -24,6 +24,15 @@ param(
     # k6 timeout after a run ends. Without a settle window the next rate step
     # measures the previous step's backlog instead of its own.
     [int]$Cooldown = 60,
+    # Audit sampling multiplies the write volume under test. 1.0 measures the
+    # worst case (every request persists); 0.1 shows the steady-state cost.
+    [ValidateRange(0.0, 1.0)]
+    [double]$AuditSampleRate = 1.0,
+    # gcra is the default; sorted-set is kept as the exact-reference path.
+    [ValidateSet('gcra', 'sorted-set')]
+    [string]$RateLimitAlgorithm = 'gcra',
+    # 0 = derive from the mode: unlimited when saturated, 6000 when enforced.
+    [int]$AbuseLimitPerIp = 0,
     [switch]$SkipWarmup,
     [switch]$NoRebuild
 )
@@ -43,14 +52,21 @@ if ($Mode -eq 'saturated') {
     $env:RATE_HIGH_TRUST = '1000000'
     $env:RATE_MEDIUM_TRUST = '1000000'
     $env:RATE_LOW_TRUST = '1000000'
+    if ($AbuseLimitPerIp -le 0) { $AbuseLimitPerIp = 100000000 }
     Write-Host "Mode: saturated (rate limits raised - measuring ceiling)" -ForegroundColor Cyan
 }
 else {
     $env:RATE_HIGH_TRUST = '50'
     $env:RATE_MEDIUM_TRUST = '30'
     $env:RATE_LOW_TRUST = '10'
+    if ($AbuseLimitPerIp -le 0) { $AbuseLimitPerIp = 6000 }
     Write-Host "Mode: enforced (production-rate limits - measuring contract)" -ForegroundColor Cyan
 }
+
+$env:RATE_ABUSE_LIMIT_PER_IP = "$AbuseLimitPerIp"
+$env:AUDIT_SAMPLE_RATE = "$AuditSampleRate"
+$env:RATE_LIMIT_ALGORITHM = $RateLimitAlgorithm
+Write-Host ("Admission: algorithm=$RateLimitAlgorithm sample_rate=$AuditSampleRate abuse_per_ip=$AbuseLimitPerIp") -ForegroundColor Cyan
 
 $env:GATEWAY_CPUS = "$GatewayCpus"
 
@@ -86,11 +102,12 @@ if (-not $ready) { throw 'Gateway did not become ready. Run: docker compose logs
 # ---- warmup -----------------------------------------------------------------
 if (-not $SkipWarmup) {
     Write-Host 'Warmup (10s, discarded)...' -ForegroundColor DarkGray
-    k6 run --quiet --no-summary `
+    k6 run --quiet `
         -e "SCENARIO=$Scenario" -e 'RATE=100' -e 'RAMP=5s' -e 'HOLD=10s' `
-        -e 'P95_BUDGET=10000' `
+        -e 'P95_BUDGET=10000' -e 'WARMUP=true' `
         -o 'json=load-tests/results/_warmup.json' `
         load-tests/capacity/capacity.js | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "k6 warmup failed (exit $LASTEXITCODE)" }
 }
 
 # ---- measured run -----------------------------------------------------------
@@ -132,29 +149,34 @@ $metricsPath = "load-tests/results/capacity-$tag.prometheus.txt"
 Set-Content -Path $metricsPath -Value $metricsSnap -Encoding utf8
 
 $gitSha = (git rev-parse HEAD).Trim()
-$gitDirty = if ((git status --porcelain)) { $true } else { $false }
+# Results are untracked by design; they must not mark a run as dirty.
+$dirtyLines = git status --porcelain -- ':!load-tests/results'
+$gitDirty = if ($dirtyLines) { $true } else { $false }
 
 $meta = [ordered]@{
-    tag            = $tag
-    scenario       = $Scenario
-    mode           = $Mode
-    target_rate    = $Rate
-    hold           = $Hold
-    ramp           = $Ramp
-    p95_budget_ms  = $P95Budget
-    gateway_cpus   = $GatewayCpus
-    cooldown_s     = $Cooldown
-    git_sha        = $gitSha
-    git_dirty      = $gitDirty
-    host_os        = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
-    host_cpus      = [Environment]::ProcessorCount
-    docker_version = (docker version --format '{{.Server.Version}}' 2>$null)
-    k6_version     = (k6 version 2>$null)
-    started_at     = $stamp
-    artifacts      = [ordered]@{
-        k6_json   = $jsonOut
-        summary   = $summaryTagged
-        metrics   = $metricsPath
+    tag                   = $tag
+    scenario              = $Scenario
+    mode                  = $Mode
+    target_rate           = $Rate
+    hold                  = $Hold
+    ramp                  = $Ramp
+    p95_budget_ms         = $P95Budget
+    gateway_cpus          = $GatewayCpus
+    cooldown_s            = $Cooldown
+    rate_limit_algorithm  = $RateLimitAlgorithm
+    audit_sample_rate     = $AuditSampleRate
+    rate_abuse_limit_per_ip = $AbuseLimitPerIp
+    git_sha               = $gitSha
+    git_dirty             = $gitDirty
+    host_os               = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+    host_cpus             = [Environment]::ProcessorCount
+    docker_version        = (docker version --format '{{.Server.Version}}' 2>$null)
+    k6_version            = (k6 version 2>$null)
+    started_at            = $stamp
+    artifacts             = [ordered]@{
+        k6_json = $jsonOut
+        summary = $summaryTagged
+        metrics = $metricsPath
     }
     container_stats = $dockerStats
 }

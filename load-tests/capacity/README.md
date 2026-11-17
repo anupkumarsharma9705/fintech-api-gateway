@@ -56,6 +56,20 @@ Both numbers are worth publishing, clearly labelled. "1,800 req/s sustained with
 limits enforced" and "6,400 req/s with admission limits raised" are both true and
 neither is misleading on its own.
 
+The runner sets these admission variables explicitly and records them in
+`meta.json`, because a throughput number without them is not reproducible:
+
+| Variable | `saturated` | `enforced` |
+|----------|-------------|------------|
+| `RATE_HIGH_TRUST` / `MEDIUM` / `LOW` | `1000000` | `50` / `30` / `10` |
+| `RATE_ABUSE_LIMIT_PER_IP` | `100000000` | `6000` |
+| `RATE_LIMIT_ALGORITHM` | `gcra` | `gcra` |
+| `AUDIT_SAMPLE_RATE` | `1.0` (override with the param) | `1.0` |
+
+Sampling changes database write volume, not gateway CPU. Run the ladder twice
+at `AUDIT_SAMPLE_RATE=1.0` and `0.1` if you want to publish both. Do not mix
+rates inside one comparison table.
+
 ---
 
 ## Running it
@@ -65,6 +79,9 @@ neither is misleading on its own.
 ```powershell
 # Baseline: measure the ceiling on the proxy path
 .\load-tests\capacity\run.ps1 -Scenario read -Mode saturated -Rate 1000 -Hold 120s
+
+# Same run with 10% audit sampling
+.\load-tests\capacity\run.ps1 -Scenario read -Mode saturated -Rate 1000 -Hold 120s -AuditSampleRate 0.1
 
 # Contract: production limits, verify enforcement holds
 .\load-tests\capacity\run.ps1 -Scenario read -Mode enforced -Rate 500 -Hold 60s
@@ -80,8 +97,13 @@ neither is misleading on its own.
 
 ```bash
 ./load-tests/capacity/run.sh read saturated 1000 120s
+AUDIT_SAMPLE_RATE=0.1 ./load-tests/capacity/run.sh read saturated 1000 120s
 ./load-tests/capacity/run.sh waf-block saturated 500 60s
 ```
+
+The runners fail loudly if the warm-up fails. k6 v2 removed `--no-summary`, so
+`capacity.js` suppresses its own summary when `WARMUP=true`; do not re-add the
+flag.
 
 Linux matters. Docker Desktop on Windows routes traffic through a virtual switch
 and port mapping, so the numbers are not portable to any real deployment. If you
@@ -114,7 +136,7 @@ Each run writes four files to `load-tests/results/`:
 |------|----------|
 | `capacity-<tag>.json` | Raw k6 samples |
 | `capacity-<tag>.summary.json` | Throughput, p50/p95/p99, error rates |
-| `capacity-<tag>.meta.json` | Git SHA, dirty flag, OS, CPU count, Docker and k6 versions, rate schedule, container CPU/memory |
+| `capacity-<tag>.meta.json` | Git SHA, dirty flag, OS, CPU count, Docker and k6 versions, rate schedule, limiter algorithm, abuse ceiling, audit sample rate, container CPU/memory |
 | `capacity-<tag>.prometheus.txt` | Gateway metrics snapshot, for correlating with JVM and cache state |
 
 **Publish the meta file alongside the number.** A throughput figure without the
@@ -144,7 +166,7 @@ credible; overstating it invites exactly the question that kills the claim.
 ## Not covered here
 
 - Business correctness of payments — see `scripts/smoke-test.sh`
-- Multi-replica aggregate throughput — Phase 4 of `docs/SCALING-PLAN.md`
+- Multi-replica aggregate throughput - Phase 4 scale-out in `docs/SCALING-PLAN.md`
 - TLS termination cost — measured at the load balancer, not the gateway
 - Sustained soak and memory stability — separate 1-hour run
 
