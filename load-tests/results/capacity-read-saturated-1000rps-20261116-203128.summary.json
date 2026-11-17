@@ -1,0 +1,14 @@
+{
+  "scenario": "read",
+  "target_rate": 1000,
+  "held_for": "60s",
+  "requests": 19717,
+  "achieved_rps": 214.57959461238164,
+  "failed_requests": 0,
+  "server_error_rate": 0,
+  "unexpected_status_rate": 0,
+  "p50_ms": 1114.8351,
+  "p95_ms": 43450.168320000004,
+  "p99_ms": 47346.494184,
+  "max_ms": 49956.8417
+}

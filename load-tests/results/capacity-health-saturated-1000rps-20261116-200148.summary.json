@@ -1,0 +1,14 @@
+{
+  "scenario": "health",
+  "target_rate": 1000,
+  "held_for": "60s",
+  "requests": 73742,
+  "achieved_rps": 867.5274470963518,
+  "failed_requests": 0,
+  "server_error_rate": 0,
+  "unexpected_status_rate": 0,
+  "p50_ms": 0,
+  "p95_ms": 4.918524999999995,
+  "p99_ms": 0,
+  "max_ms": 208.1545
+}

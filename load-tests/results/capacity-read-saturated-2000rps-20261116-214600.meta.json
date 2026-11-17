@@ -1,0 +1,32 @@
+﻿{
+    "tag":  "read-saturated-2000rps-20261116-214600",
+    "scenario":  "read",
+    "mode":  "saturated",
+    "target_rate":  2000,
+    "hold":  "60s",
+    "ramp":  "20s",
+    "p95_budget_ms":  50,
+    "gateway_cpus":  2,
+    "cooldown_s":  60,
+    "git_sha":  "f18bfe046da671af87c1235053ac87eeda568a5d",
+    "git_dirty":  true,
+    "host_os":  "Microsoft Windows 10.0.26300 ",
+    "host_cpus":  12,
+    "docker_version":  "29.9.2",
+    "k6_version":  "k6.exe v2.4.0 (commit/dd9395906d, go1.26.11, windows/amd64)",
+    "started_at":  "20261116-214600",
+    "artifacts":  {
+                      "k6_json":  "load-tests/results/capacity-read-saturated-2000rps-20261116-214600.json",
+                      "summary":  "load-tests/results/capacity-read-saturated-2000rps-20261116-214600.summary.json",
+                      "metrics":  "load-tests/results/capacity-read-saturated-2000rps-20261116-214600.prometheus.txt"
+                  },
+    "container_stats":  [
+                            "fintech-gateway-gateway-1|0.47%|967MiB / 1GiB",
+                            "fintech-gateway-sink-1|0.00%|45.93MiB / 7.622GiB",
+                            "fintech-gateway-redis-1|5.27%|6.266MiB / 7.622GiB",
+                            "fintech-gateway-mysql-1|0.90%|473.9MiB / 7.622GiB",
+                            "fintech-gateway-backend-1|6.99%|203.6MiB / 7.622GiB",
+                            "java-companion-orchestrator-server-1|0.25%|646.8MiB / 7.622GiB",
+                            "java-companion-postgres-1|0.00%|45.34MiB / 7.622GiB"
+                        ]
+}
