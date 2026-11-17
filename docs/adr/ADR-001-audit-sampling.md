@@ -1,9 +1,9 @@
 # ADR-001: Audit sampling and batching
 
-- **Status:** Proposed (requires operator sign-off before implementation)
+- **Status:** Accepted for implementation (2026-11-17). Production or pilot use still requires a named compliance-owner sign-off on the control list below.
 - **Date:** 2026-11-16
 - **Deciders:** Platform owner, compliance owner
-- **Affects:** `AuditLogger`, `PersistenceService`, `/compliance/**`, retention policy
+- **Affects:** `AuditLogger`, `AuditWriteBuffer`, `PersistenceService`, `/compliance/**`, retention policy
 
 ## Context
 
@@ -99,10 +99,33 @@ false confidence.
 - The retention policy can now be expressed in days of *sampled* volume rather
   than raw request volume.
 
-## Sign-off required
+## Implementation notes (2026-11-17)
 
-This ADR is **not** approved for implementation until the compliance owner
-confirms:
+The decision above is implemented in the gateway:
+
+- `AuditSamplingPolicy` implements the deterministic request-id sample and the
+  never-sample list. The default remains `AUDIT_SAMPLE_RATE=1.0`.
+- `AuditWriteBuffer` owns two bounded queues (critical and sampled) and one
+  background writer. The request thread only calls a non-blocking `offer`; a
+  full queue drops and counts the event instead of blocking the Tomcat thread.
+- Batches are written with `JdbcTemplate.batchUpdate` (default 500 rows or
+  100 ms). A failed batch is retried once; a repeated failure increments
+  `gateway.audit.write.failures` and `gateway.audit.dropped{reason=write_failure}`
+  and emits one loud error line.
+- `/compliance/evidence/summary` and `/compliance/evidence/audit.csv` expose
+  `sampled`/`sampleRate`; the CSV adds `sample_rate` and `dataset_sampled`, and
+  the response carries `X-Evidence-Sampled` / `X-Evidence-Sample-Rate`.
+- The production floor of `0.01` is enforced only in the `prod` profile.
+
+Measured effect is recorded in `load-tests/CAPACITY.md`. Sampling at `1.0` and
+`0.1` is measured separately, because sampling changes database write volume,
+not gateway CPU cost.
+
+## Sign-off required before a production or pilot deployment
+
+This ADR is accepted for implementation in this repository. It is **not** an
+attestation that the policy satisfies any specific regime until the compliance
+owner confirms:
 
 1. the never-sampled list is complete for the target regimes (PCI-DSS, RBI,
    NPCI);
@@ -110,5 +133,5 @@ confirms:
 3. the `sampled` / `sampleRate` fields and export wording are acceptable as the
    disclosure mechanism.
 
-Until then, Phase 3 (audit sampling/batching) stays blocked and the gateway
-keeps writing every event.
+Until that sign-off is recorded, a pilot or production deployment must keep
+`AUDIT_SAMPLE_RATE=1.0` and treat the sampling path as measured but unapproved.

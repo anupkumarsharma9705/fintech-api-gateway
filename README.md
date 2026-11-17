@@ -73,20 +73,22 @@ Filters run in this order (lower order value first):
    `X-Tenant-Id` header and default tenant.
 2. Resolve the caller IP. `X-Forwarded-For` is ignored unless
    `TRUST_PROXY=true`; spoofed or malformed values fall back to the socket IP.
-3. Read the trust tier. Blacklisted callers get HTTP 403.
-4. Consume one slot from the exact Redis sliding window. Exhausted callers get
-   HTTP 429 with `Retry-After` and `X-RateLimit-*` headers.
-5. Reject methods outside the proxy allowlist with HTTP 405 before any body is
+3. Resolve blacklist, trust tier, tenant+client quota and tenant+IP abuse
+   ceiling in one atomic Redis script. Blacklisted callers get HTTP 403;
+   exhausted callers get HTTP 429 with `Retry-After` and `X-RateLimit-*`
+   headers.
+4. Reject methods outside the proxy allowlist with HTTP 405 before any body is
    read; the request is audited as `BLOCK` / `METHOD_NOT_ALLOWED`.
-6. Buffer the body up to `MAX_BODY_BYTES`, then normalize and inspect it for
+5. Buffer the body up to `MAX_BODY_BYTES`, then normalize and inspect it for
    SQL injection, XSS, path traversal and command injection.
-7. Score risk (endpoint sensitivity, payload size, business-hour window, trust
+6. Score risk (endpoint sensitivity, payload size, business-hour window, trust
    tier) and decide ALLOW / THROTTLE / BLOCK.
-8. For unsafe methods on `/api/payments`, require an `Idempotency-Key` and claim
+7. For unsafe methods on `/api/payments`, require an `Idempotency-Key` and claim
    it atomically. Replays return the stored response; concurrent duplicates get
    HTTP 409.
-9. Proxy to the backend, release or complete the idempotency claim, record good
-   behaviour, write the audit row (including `client_id`) and emit metrics.
+8. Proxy to the backend, release or complete the idempotency claim, record good
+   behaviour asynchronously, enqueue the audit row (including `client_id`) and
+   emit metrics. No INSERT runs on a Tomcat thread.
 
 Internal paths (`/health`, `/actuator`, `/feedback`, `/compliance`,
 `/swagger-ui`, `/v3/api-docs`, `/error`) bypass the admission pipeline. Browser
@@ -238,8 +240,10 @@ still operator responsibilities.
 | Request encoding | Compressed request bodies get 415; the WAF only inspects plaintext, and silently forwarding compressed bytes would bypass it |
 | Upstream response limit | `MAX_UPSTREAM_RESPONSE_BYTES` (default 10 MiB); oversized responses get 502 without unbounded buffering |
 | Idempotency | Tenant-scoped `SET NX EX` claim with a unique owner token; Lua compare-and-set/delete refuses stale owners; required on `/api/payments` |
-| Rate limiting | Exact Redis sorted-set sliding window per tenant + IP; tier limits 50/30/10/0 |
+| Rate limiting | Tenant+client quota (GCRA by default, exact sorted-set fallback) plus tenant+IP abuse ceiling; tier limits 50/30/10/0; fail-closed |
 | Trust tiers | HIGH/MEDIUM/LOW/BLACKLISTED with Caffeine 30s cache; blacklist never cached; 4 blocks in 24h blacklists |
+| Audit sampling | Only clean 2xx ALLOW traffic is eligible; blocks, auth failures, WAF detections, payment paths and idempotent requests are always persisted; the effective rate is disclosed on every compliance response |
+| Audit persistence | Two bounded queues (critical/sampled) and one background batch writer; a full queue drops and counts instead of blocking the request |
 | Operator auth | SHA-256 + `MessageDigest.isEqual`; unset key rejects every `/feedback/**` and `/compliance/**` call; 10 failures per 15 min locks the IP out |
 | Compliance export | Operator-only, row- and window-bounded, `Cache-Control: no-store`, CSV fields quoted and formula-neutralized |
 | Proxy trust | `X-Forwarded-For` ignored unless `TRUST_PROXY=true`; IP syntax validated |
@@ -255,13 +259,19 @@ failures, distinct tenants/clients, trust transitions, coverage metadata).
 
 `GET /compliance/evidence/audit.csv` returns a bounded CSV export with
 `id, timestamp, tenant_id, client_id, ip, method, uri, decision, risk_score,
-attack_type, status_code, latency_ms, request_id`.
+attack_type, status_code, latency_ms, request_id, sample_rate, dataset_sampled`.
 
 Both require `X-Internal-Ops-Key`. The window defaults to 24 hours, cannot
 exceed 90 days, and rows default to 1,000 with a 10,000 cap. Exports larger than
 the cap are marked `X-Evidence-Truncated: true`; the operator must narrow the
 window. Every export is itself audited (`COMPLIANCE_EXPORT`) and counted in
 `gateway.compliance.export{type}`.
+
+When `AUDIT_SAMPLE_RATE < 1.0`, both endpoints also return `"sampled": true`,
+`"sampleRate": <n>`, `X-Evidence-Sampled` and `X-Evidence-Sample-Rate`. The CSV
+repeats the rate on every row, so an exported file cannot be mistaken for a
+complete trail after it leaves the gateway. See
+[ADR-001](docs/adr/ADR-001-audit-sampling.md) for the never-sampled list.
 
 `wafDetections` is a positive allowlist of the four WAF signature families the
 gateway emits (`SQL_INJECTION`, `XSS`, `PATH_TRAVERSAL`, `COMMAND_INJECTION`).
@@ -301,12 +311,19 @@ Metrics are intentionally low-cardinality (tenant and IP are not tags):
 - `gateway.security.dependency.failure`
 - `gateway.auth.failures{reason}`
 - `gateway.compliance.export{type}`
+- `gateway.audit.sampled_out`
+- `gateway.audit.persisted{dataset}`
+- `gateway.audit.dropped{dataset,reason}`
+- `gateway.audit.write.failures`
+- `gateway.audit.queue.depth{dataset}`
 
 The audit trail is written to three places: the `AUDIT` logger (stdout and
 `audit.log`), the `audit_logs` table, and `trust_history` for tier changes.
 Attacker-controlled fields are sanitized and truncated before logging. Once
 client authentication is enabled, each audit row records the authenticated
-`client_id` (or `internal-ops` for evidence exports).
+`client_id` (or `internal-ops` for evidence exports). Durable rows are written
+by a background batch writer; at `AUDIT_SAMPLE_RATE=1.0` every event is queued
+on the critical dataset, exactly as before sampling existed.
 
 Log retention defaults: audit 90 days / 20 GB cap, application 30 days / 5 GB
 cap. In containers these live in the `gateway_logs` volume. Ship them to your
@@ -338,6 +355,9 @@ Every knob is environment-overridable. The full table is in
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
 | `MAX_UPSTREAM_RESPONSE_BYTES` | `10485760` | Upstream response cap |
 | `RATE_LIMIT_ENABLED` | `true` | Disable only for isolated tests |
+| `RATE_LIMIT_ALGORITHM` | `gcra` | `gcra` (O(1) state) or `sorted-set` (exact reference) |
+| `RATE_ABUSE_LIMIT_PER_IP` | `6000` | Coarse per-tenant, per-IP ceiling; raise for capacity tests |
+| `AUDIT_SAMPLE_RATE` | `1.0` | `1.0` persists every audit event; below `1.0` samples only clean ALLOW traffic (`prod` floor `0.01`) |
 | `IDEMPOTENCY_TTL` | `24h` | Replay window |
 | `COMPLIANCE_DEFAULT_WINDOW` / `COMPLIANCE_MAX_WINDOW` | `24h` / `90d` | Evidence window bounds |
 | `COMPLIANCE_DEFAULT_ROWS` / `COMPLIANCE_MAX_ROWS` | `1000` / `10000` | CSV row bounds |
@@ -352,35 +372,43 @@ mvn clean verify
 ```
 
 The suite is pure JUnit 5 + Mockito and does not need Docker or a Spring
-context. It currently covers **272 tests**:
+context by default. It currently covers **346 tests** (345 gateway + 1 backend).
+Eight of the gateway tests are an opt-in real-Redis contract suite and are
+reported as skipped unless enabled:
 
-- 271 gateway tests: WAF signatures and normalization, risk decisions, rate
-  limiter Lua contract, atomic idempotency (owner-tokened claims, byte-identical
-  replay of compressed responses, storage-failure delivery), compressed-body
-  rejection, trust tiers, wrappers, filters, proxy status/header/response-limit
-  handling, OAuth2 token validation and failure mapping, tenant binding,
-  compliance summary/CSV bounds and formula neutralization, audit sanitization,
-  persistence, feedback, controller method allowlist and request-context
-  helpers.
-- 1 backend context test.
+```bash
+docker run --rm -d --name gw-redis-it -p 6390:6379 redis:7.4-alpine
+GATEWAY_REDIS_IT=true GATEWAY_IT_REDIS_PORT=6390 \
+  mvn -pl fintech-gateway/fintech-gateway test -Dtest=RateLimitScriptsIntegrationTest
+```
 
-There are **no JUnit integration tests against real MySQL/Redis or a real HTTP
-upstream** yet. Testcontainers was removed because Docker was unavailable in the
-development environment. CI starts the Compose stack and runs end-to-end smoke
+The unit suite covers WAF signatures and normalization, risk decisions, the
+admission script contract as Java sees it, cost accounting for THROTTLE
+penalties, atomic idempotency (owner-tokened claims, byte-identical replay of
+compressed responses, storage-failure delivery), compressed-body rejection,
+trust tiers, wrappers, filters, proxy status/header/response-limit handling,
+OAuth2 token validation and failure mapping, tenant binding, audit sampling and
+batching, audit sanitization, compliance summary/CSV bounds and formula
+neutralization, feedback, controller method allowlist and request-context
+helpers. The real-Redis suite covers what mocks cannot: exact burst size,
+cost borrowing, refill timing, sub-millisecond emission intervals,
+blacklist/trust interaction and the tenant+IP abuse ceiling.
+
+MySQL and a real HTTP upstream still have **no JUnit integration suite**.
+Testcontainers was removed because Docker was unavailable in the development
+environment; the limiter's real-Redis contract test above is the first slice of
+that gap being closed. CI starts the Compose stack and runs end-to-end smoke
 checks (health, balance, payment replay, WAF, method allowlist, body encoding,
 operator auth, compliance export), but that is a deployment smoke test, not a
-full integration suite. This is a remaining gap before calling the system
-production-verified. The JWT tests
-use a real loopback JWK server and real RS256 tokens, so signature, issuer,
-audience and claim handling are exercised without a mock decoder.
+full integration suite. This remains a gap before calling the system
+production-verified. The JWT tests use a real loopback JWK server and real RS256
+tokens, so signature, issuer, audience and claim handling are exercised without
+a mock decoder.
 
-Load-test scripts live in `load-tests/` (k6, targeting
-`host.docker.internal:8081`). **Real results committed** in `load-tests/RESULTS.md`
-and `load-tests/results/*.json`:
-
-- Baseline: 5.5 req/s sustained, p95 11.5 ms, 0% errors (rate limiting active)
-- Health endpoint: 55 req/s, p95 7.4 ms (bypasses admission pipeline)
-- Idempotency: 80% perfect runs; when first request succeeds, duplicates 100% cached
+Load-test methodology, hardware disclosure and real measurements live in
+[`load-tests/CAPACITY.md`](load-tests/CAPACITY.md). The older `load-tests/RESULTS.md`
+numbers came from a closed-loop script and are kept only as history, not as a
+capacity claim.
 
 ---
 
@@ -391,20 +419,26 @@ and `load-tests/results/*.json`:
 - OAuth2 client-credentials authentication with local JWT validation, tenant
   binding, scope checks and fail-closed IdP outage handling.
 - Deterministic admission pipeline with fail-closed dependency handling.
-- Atomic, tenant-scoped idempotency and exact sliding-window rate limiting.
+- Atomic, tenant-scoped idempotency.
+- Tenant+client GCRA quota and tenant+IP abuse ceiling, with an exact
+  sorted-set fallback for auditors who want reference semantics.
 - WAF normalization and bounded request/response buffering.
 - Durable audit schema, `client_id` attribution and Flyway migrations.
-- Bounded compliance evidence summary and CSV export for operators.
+- Deterministic audit sampling with a never-sample security list, bounded
+  dual-queue buffering and a batch writer outside the request path.
+- Bounded compliance evidence summary and CSV export for operators, with
+  sampling disclosed on every response and row.
 - Operator authentication with constant-time comparison and Redis lockout.
-- Health/readiness separation, graceful shutdown, bounded async executor.
+- Health/readiness separation, graceful shutdown, bounded audit buffer.
 - Non-root, read-only container images; loopback-only published ports.
 - CI for build, tests, Compose validation and a live stack smoke test.
 
 ### Not done — do not claim GA without these
 
-1. **Integration and contract tests.** Real MySQL/Redis, Flyway upgrade path,
-   upstream error/timeout matrix, concurrent idempotency race, live IdP/JWKS
-   rotation, load/soak runs.
+1. **Full integration suite.** MySQL/Flyway upgrade and restore path, upstream
+   error/timeout matrix, concurrent idempotency race, live IdP/JWKS rotation and
+   soak tests under Testcontainers. The limiter Lua has an opt-in real-Redis
+   contract test; the rest still relies on the Compose smoke test.
 2. **High availability.** Kubernetes/Helm manifests, PodDisruptionBudgets,
    Redis Sentinel/Cluster, MySQL replication, tested restore procedure.
 3. **Secrets management.** Vault/cloud secret manager integration and key

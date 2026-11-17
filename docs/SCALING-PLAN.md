@@ -1,8 +1,26 @@
 # Scaling Plan — From "Test Harness Numbers" to Real Capacity
 
-**Status:** Plan only. No code changes yet.
-**Date:** 2026-11-16
+**Status:** In progress. Phases 0–2 are implemented and measured on
+Windows/Docker Desktop; the Linux publishing run and Phase 4 scale-out are open.
+**Date:** 2026-11-16 (status updated 2026-11-17)
 **Scope:** Throughput and latency of `fintech-gateway/fintech-gateway`.
+
+## Current status (2026-11-17)
+
+| Item | State | Evidence |
+|---|---|---|
+| Measurement rig (open-loop k6, nginx sink, runners) | Done | `load-tests/capacity/` |
+| Single-round-trip admission | Done | `AdmissionGate`, commit `00d8804` |
+| Async logging and explicit container limits | Done | commit `00d8804` |
+| Audit write out of the request path | Done | `AuditWriteBuffer`, ADR-001 |
+| GCRA limiter + tenant/client keying | Done | `RateLimitScripts`, `RedisKeys` |
+| Real-Redis limiter contract test | Done (opt-in) | `RateLimitScriptsIntegrationTest` |
+| Windows capacity ladder after Phases 2–4 | Done | `load-tests/CAPACITY.md` |
+| Linux VM repeat of the ladder | **Blocked: no VM provisioned** | — |
+| Multi-replica, soak, chaos | **Not started** | — |
+
+The Windows numbers are useful for regression detection and are disclosed as
+non-portable. They are not the published capacity claim.
 
 ---
 
@@ -301,7 +319,7 @@ raw JSON, the knee point, and an explicit "what this does not prove" section.
 |----------|--------|-------------|
 | Test hardware | **Both, compared** | Windows/Docker Desktop for fast iteration, always labelled non-portable. Every published number comes from a Linux VM. |
 | Ceiling | **T4 — 20k+ req/s aggregate** | Full ladder: Phase 0 → 1 → 2 → 3 → 4, including multi-replica proof, soak and chaos. |
-| Audit sampling | **Accepted in principle** | Sample `ALLOW` reads, keep every `BLOCK` / WAF / payment / idempotency event. Requires an ADR and a visible `sampled` flag in the compliance API *before* code is written. |
+| Audit sampling | **Accepted and implemented** | Sample `ALLOW` reads, keep every `BLOCK` / WAF / payment / idempotency event. ADR-001 records the policy; compliance responses expose `sampled` + `sampleRate`. A named compliance owner must still sign the control list before production/pilot use. |
 
 The audit-sampling decision is the only one with a product consequence: it changes
 what "compliance evidence" means. It must not be shipped quietly.
@@ -327,10 +345,10 @@ Each line is a reviewable unit with a gate that must pass before the next starts
 |---|--------|------|
 | **0** | **Measurement rig** — `capacity.js`, nginx sink, Compose overlay, Windows/Linux runners | Rig runs and produces a full artifact set. *Done.* |
 | **1** | Baseline run: rate ladder on Windows, then Linux | `load-tests/CAPACITY.md` with a real curve and a knee, meta files committed |
-| **2** | B1 — single Lua script for blacklist + tier + limit + good-behaviour | Redis ops/request = 1 (verified by `INFO commandstats`); T1 delta measured |
-| **3** | B5 + B10 — async logging, no console in prod, explicit JVM sizing, container limits | No log write on the request thread; GC pause p99 recorded before/after |
-| **4** | ADR for audit sampling, then B4 — batched inserts, sampled `ALLOW` reads, NDJSON evidence stream | MySQL rows/s flat as rps rises; `/compliance` reports `sampled` + rate |
-| **5** | B2 + B3 — GCRA limiter behind a flag, tenant-keyed buckets | Same enforcement semantics proven by test; Redis memory constant vs window |
+| **2** | B1 — single Lua script for blacklist + tier + limit + good-behaviour | Redis ops/request = 1 (verified by `INFO commandstats`); T1 delta measured. *Implemented and measured.* |
+| **3** | B5 + B10 — async logging, no console in prod, explicit JVM sizing, container limits | No log write on the request thread; GC pause p99 recorded before/after. *Implemented and measured.* |
+| **4** | ADR for audit sampling, then B4 — batched inserts, sampled `ALLOW` reads, NDJSON evidence stream | MySQL rows/s flat as rps rises; `/compliance` reports `sampled` + rate. *Implemented; NDJSON stream is not implemented.* |
+| **5** | B2 + B3 — GCRA limiter behind a flag, tenant-keyed buckets | Same enforcement semantics proven by test; Redis memory constant vs window. *Implemented; real-Redis contract test added.* |
 | **6** | B6 + B7 — single-copy bodies, capture only for idempotent requests, WAF literal prefilter + single decode | `waf-clean` throughput up; `waf-block` still 100% at rate |
 | **7** | B8 — virtual threads A/B | Keep only if measured win; otherwise document why not |
 | **8** | Linux VM: repeat the full ladder, publish | Every number carries host specs + commit SHA |

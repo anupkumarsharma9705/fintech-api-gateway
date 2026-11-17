@@ -109,19 +109,23 @@ gateway does not fix a dependency and can amplify the outage.
 Requests continue to be proxied because audit writes are asynchronous and
 best-effort. Readiness goes DOWN and the audit table stops receiving rows until
 MySQL returns. The structured `AUDIT` log line is still emitted, so preserve and
-ship stdout during the outage. When the audit queue (capacity 5,000, 2–8
-threads) fills, `CallerRunsPolicy` applies backpressure to request threads and
-latency rises; this is deliberate but should page an operator before it happens.
+ship stdout during the outage. The writer keeps trying; when the critical queue
+(default 20,000) or sampled queue (default 10,000) fills, new rows are dropped
+and counted in `gateway.audit.dropped{dataset,reason="queue_full"}` rather than
+blocking request threads. **A MySQL outage therefore opens an evidence gap.**
+Page an operator before either queue fills; do not assume the database will
+catch up.
 
 ### Redis outage
 
 Admission fails closed for every non-internal path. `/health` and
 `/actuator/health/liveness` still return 200; readiness returns DOWN. Restoring
 Redis clears in-flight rate windows and, depending on persistence/failover, may
-lose recent idempotency records and trust changes. **A lost idempotency record
-means the gateway can no longer suppress a duplicate payment.** The backend must
-keep its own idempotency defense until Redis durability is proven for your
-deployment.
+lose recent idempotency records and trust changes. Limiter and trust keys are
+rebuilt on demand; completed idempotency records are not. **A lost idempotency
+record means the gateway can no longer suppress a duplicate payment.** The
+backend must keep its own idempotency defense until Redis durability is proven
+for your deployment.
 
 ### Identity-provider / JWKS outage
 
@@ -146,15 +150,16 @@ fetch the new JWK set, so publish the new key before signing with it.
 curl -sS -X POST http://localhost:8081/feedback/false-positive \
   -H 'Content-Type: application/json' \
   -H "X-Internal-Ops-Key: $INTERNAL_OPS_API_KEY" \
-  -d '{"ip":"203.0.113.5","reason":"support ticket 1234"}'
+  -d '{"tenantId":"tenant-a","ip":"203.0.113.5","reason":"support ticket 1234"}'
 ```
 
-The reset deletes `blacklist:`, `blockcount:`, `throttlecount:`, `goodcount:`
-and `trust:` for the IP, invalidates the local tier cache, restores MEDIUM and
-writes a `trust_history` row. Verify:
+`tenantId` is required and must match `TENANT_PATTERN`. The reset deletes the
+tenant-scoped `gw:v2:{t:<hash>}:blacklist:`, `blockcount:`, `throttlecount:`,
+`goodcount:` and `trust:` keys for the IP, invalidates the local tier cache,
+restores MEDIUM and writes a `trust_history` row with the tenant.
 
 ```sql
-SELECT ip, previous_tier, new_tier, reason, timestamp
+SELECT tenant_id, ip, previous_tier, new_tier, reason, timestamp
 FROM trust_history WHERE ip = '203.0.113.5'
 ORDER BY timestamp DESC LIMIT 5;
 ```
@@ -189,11 +194,15 @@ curl -fsS -D headers.txt \
   -H "X-Internal-Ops-Key: $INTERNAL_OPS_API_KEY" \
   -o "audit-evidence-$FROM.csv"
 
-grep -iE 'x-evidence-(rows|truncated)|cache-control' headers.txt
+grep -iE 'x-evidence-(rows|truncated|sampled|sample-rate)|cache-control' headers.txt
 ```
 
 - `X-Evidence-Truncated: true` means the row cap was hit. The endpoint has no
   cursor; split the window into smaller intervals and export each one.
+- `X-Evidence-Sampled: true` and `X-Evidence-Sample-Rate: <n>` mean durable rows
+  were sampled. Attach that disclosure to the exported file; the CSV also
+  carries `sample_rate` and `dataset_sampled` on every row. Security, payment
+  and idempotency events are always present regardless of the rate.
 - `wafDetections` counts only the four WAF signature families
   (`SQL_INJECTION`, `XSS`, `PATH_TRAVERSAL`, `COMMAND_INJECTION`). Rate limits,
   replays, method rejections, blacklist blocks and auth failures appear in
@@ -250,6 +259,25 @@ Rollback: redeploy the previous image tag. If the release applied a schema
 migration, roll back the application only after confirming the old code is
 compatible with the new schema; otherwise restore the database backup.
 
+### Verify the limiter against a real Redis
+
+The mock-based unit tests prove Java's mapping of the script result; they cannot
+prove burst counting or refill timing. After changing any Lua, run the opt-in
+contract suite:
+
+```bash
+docker run --rm -d --name gw-redis-it -p 6390:6379 redis:7.4-alpine
+GATEWAY_REDIS_IT=true GATEWAY_IT_REDIS_PORT=6390 \
+  mvn -pl fintech-gateway/fintech-gateway test -Dtest=RateLimitScriptsIntegrationTest
+docker rm -f gw-redis-it
+```
+
+It asserts that a fresh bucket admits exactly `limit` requests, that a cost
+cannot borrow future slots, that sub-millisecond emission intervals do not
+collapse to 60,000/min, that a slot refills after one interval, that the abuse
+ceiling admits exactly its limit and not one more, and that the sorted-set
+fallback has the same contract.
+
 ### Scale out
 
 The gateway is stateless apart from Redis and MySQL, so run as many instances as
@@ -259,12 +287,16 @@ dependencies first:
 
 - Redis: `maxmemory-policy noeviction` (already set in Compose). Evicting
   security state would fail open or lose idempotency; add memory or shard
-  instead.
+  instead. Every key for one tenant shares a hash tag, so a multi-key admission
+  script stays in one Cluster slot.
 - MySQL: Hikari is 20 connections per instance by default. Multiply by the
   instance count and stay below the server's `max_connections`; raise
   `DB_POOL_MAX` only with evidence.
-- Audit executor: 2–8 threads and a 5,000-task queue per instance. Watch the
-  queue and DB write latency.
+- Audit writer: one background thread per instance with two bounded queues
+  (20,000 critical / 10,000 sampled by default). Watch
+  `gateway.audit.queue.depth`, `gateway.audit.dropped` and
+  `gateway.audit.write.failures`. Raise capacity only after checking database
+  write latency; a larger queue delays the evidence gap, it does not fix it.
 
 ## 6. Backup and restore
 
@@ -304,6 +336,17 @@ Alert on symptoms, not just resource usage:
 - `gateway.upstream.errors` rising — backend or network problem.
 - 5xx ratio and `gateway.request.duration` p95/p99 — user-visible degradation.
 - `gateway.rate.limited` spike — attack, misconfigured client, or limits too low.
+  Correlate with the `ABUSE` vs `QUOTA` reason in the audit row; an abuse spike
+  from one tenant+IP is a different incident from one client exhausting its
+  quota.
+- `gateway.audit.dropped{dataset,reason}` > 0 — evidence was lost. Queue-full
+  means the database is too slow or the rate is above the writer's throughput;
+  write-failure means MySQL rejected a batch twice. Page before restarting.
+- `gateway.audit.queue.depth{dataset}` rising — the writer is behind. Compare
+  with MySQL write latency before raising queue capacity.
+- `gateway.audit.write.failures` > 0 — a batch was dropped after one retry.
+- `gateway.audit.sampled_out` — expected only when `AUDIT_SAMPLE_RATE < 1.0`;
+  a positive rate on a full-persistence deployment means misconfiguration.
 - `gateway.idempotency.store.failure` > 0 — a successful payment could not be
   recorded for replay. The client still received the upstream response and the
   claim stays reserved; investigate Redis before the TTL expires.
@@ -319,11 +362,12 @@ Alert on symptoms, not just resource usage:
   operator hours mean audit data is being accessed; correlate with
   `attack_type = 'COMPLIANCE_EXPORT'`.
 - Readiness DOWN while liveness UP — dependency outage; do not restart.
-- MySQL audit queue depth / write latency — evidence loss risk.
 - Disk usage on `gateway_logs`, `mysql_data`, `redis_data`.
 
-Tune thresholds from measured baselines. The k6 scripts in `load-tests/` target
-`host.docker.internal:8081`; run them against a staging stack, not production.
+Tune thresholds from measured baselines. The open-loop capacity harness lives
+in `load-tests/capacity/`; it records the git SHA, host, Docker/k6 versions,
+limiter algorithm, abuse ceiling and audit sample rate with every run. Run it
+against a staging stack, not production.
 
 ## 8. Security operations
 

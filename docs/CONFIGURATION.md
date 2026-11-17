@@ -115,11 +115,65 @@ LOW +20, BLACKLISTED +100. The result is clamped to 0–100.
 | `RATE_HIGH_TRUST` | `50` | Requests per window for HIGH trust |
 | `RATE_MEDIUM_TRUST` | `30` | Requests per window for MEDIUM trust |
 | `RATE_LOW_TRUST` | `10` | Requests per window for LOW trust |
-| `RATE_THROTTLE_COST` | `3` | Extra slots consumed by a THROTTLE decision |
+| `RATE_THROTTLE_COST` | `3` | Slots consumed by a THROTTLE decision |
+| `RATE_LIMIT_ALGORITHM` | `gcra` | `gcra` (O(1) state) or `sorted-set` (exact reference) |
+| `RATE_ABUSE_LIMIT_PER_IP` | `6000` | Coarse per-tenant, per-IP ceiling per window |
 
-Blacklisted callers have a limit of 0 and are rejected before the limiter runs.
-Keys are `ratelimit:<tenant>:<ip>`. The Lua script removes expired members and
-adds `cost` members atomically, so the window is exact across instances.
+The admission script resolves four things in one atomic Redis round trip:
+
+| Key | Scope | Purpose |
+|---|---|---|
+| `gw:v2:{t:<hash>}:blacklist:<ip>` | tenant + IP | Permanent blacklist |
+| `gw:v2:{t:<hash>}:trust:<ip>` | tenant + IP | HIGH/MEDIUM/LOW tier |
+| `gw:v2:{t:<hash>}:quota:<client-hash>` | tenant + client | The real quota |
+| `gw:v2:{t:<hash>}:abuse:<ip>` | tenant + IP | Anti-abuse ceiling |
+
+The quota is per authenticated client, not per IP, because a paying tenant
+behind NAT must not share a bucket with unrelated clients. The abuse ceiling is
+per IP, because a single host must not escape by rotating client ids. All keys
+for one tenant share the `{t:<hash>}` Redis Cluster hash tag, so the multi-key
+script remains single-slot. The tag hashes the tenant id, so a brace in a tenant
+string cannot move a key into another slot.
+
+GCRA stores one theoretical-arrival-time value per bucket. The emission interval
+is `ceil(window / limit)` microseconds; a fresh bucket admits exactly `limit`
+requests and then refills one slot per interval. `RATE_THROTTLE_COST` is checked
+before it is applied, so a penalized request cannot borrow future slots. The
+`sorted-set` algorithm is retained as an exact reference and for operators who
+prefer its memory/latency trade-off; both return the same admission contract.
+
+Blacklisted callers have a limit of 0 and are rejected before any bucket is
+consumed. Redis is a required dependency: an unavailable or malformed script
+result is a 503, never an allow.
+
+## Audit evidence
+
+| Variable | Default | Description |
+|---|---|---|
+| `AUDIT_SAMPLE_RATE` | `1.0` | `1.0` persists every event; below `1.0` samples clean ALLOW traffic. `prod` refuses below `0.01` |
+| `AUDIT_NEVER_SAMPLE_PATHS` | `/api/payments,/api/transfers,/api/transactions,/api/refunds` | Path prefixes always persisted |
+| `AUDIT_CRITICAL_QUEUE_CAPACITY` | `20000` | Bounded queue for security/payment/operator events |
+| `AUDIT_SAMPLED_QUEUE_CAPACITY` | `10000` | Bounded queue for sampled clean traffic |
+| `AUDIT_WRITE_BATCH_SIZE` | `500` | Rows per JDBC batch |
+| `AUDIT_WRITE_FLUSH_INTERVAL` | `100ms` | Idle flush interval |
+
+Only `ALLOW` responses with status `< 400`, no attack type, no idempotency
+interaction, no percent-encoded URI and no configured payment prefix are
+eligible for sampling. Every `BLOCK`, authentication/authorization failure,
+WAF detection, payment path and idempotency event is persisted at 100%,
+regardless of the configured rate.
+
+Sampling is deterministic on `X-Request-Id`: a retried request always lands on
+the same side of the sample. A missing request id is always persisted. Sampled
+records go to the sampled queue; everything else goes to the critical queue, so
+a flood of clean traffic cannot delay security evidence.
+
+Queue refusal is explicit backpressure: the event is dropped, counted in
+`gateway.audit.dropped{dataset,reason}`, and logged at most once every five
+seconds. The request is not blocked and is not failed. A batch that fails twice
+is dropped the same way and counted in `gateway.audit.write.failures`. At
+`AUDIT_SAMPLE_RATE=1.0` all events use the critical queue, preserving the
+pre-sampling behaviour.
 
 ## Idempotency
 
@@ -247,8 +301,11 @@ rejected with 400 `future_time_range`; an over-long window returns 400
 `range_too_large`; a non-positive `limit` returns 400 `invalid_limit`. Both
 responses use `Cache-Control: no-store`.
 
-The CSV response also sets `X-Evidence-Rows` and `X-Evidence-Truncated`. Every
-export writes a `COMPLIANCE_EXPORT` audit event and increments
+The CSV response also sets `X-Evidence-Rows` and `X-Evidence-Truncated`. When
+sampling is active it also sets `X-Evidence-Sampled: true` and
+`X-Evidence-Sample-Rate: <n>`; the summary body carries `sampled` and
+`sampleRate`, and the CSV adds `sample_rate` and `dataset_sampled` columns.
+Every export writes a `COMPLIANCE_EXPORT` audit event and increments
 `gateway.compliance.export{type}`.
 
 ## Docker Compose variables
