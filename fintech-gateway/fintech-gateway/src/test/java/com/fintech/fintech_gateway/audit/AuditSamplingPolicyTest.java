@@ -6,6 +6,7 @@ import com.fintech.fintech_gateway.config.GatewayProperties;
 import com.fintech.fintech_gateway.risk.RiskDecisionEngine.Decision;
 import com.fintech.fintech_gateway.support.TestProperties;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.mock.env.MockEnvironment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -169,6 +170,24 @@ class AuditSamplingPolicyTest {
         assertThrows(IllegalArgumentException.class, () -> policy(1.5, "dev"));
         assertThrows(IllegalArgumentException.class, () -> policy(-0.1, "dev"));
         assertThrows(IllegalArgumentException.class, () -> policy(Double.NaN, "dev"));
+    }
+
+    @Test
+    void springResolvesTheProductionConstructorWithoutAByteArrayBean() {
+        GatewayProperties properties = TestProperties.defaults();
+        properties.getAudit().setSampleRate(0.25);
+        MockEnvironment environment = new MockEnvironment();
+        environment.setActiveProfiles("dev");
+
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.setEnvironment(environment);
+            context.getBeanFactory().registerSingleton("gatewayProperties", properties);
+            context.register(AuditSamplingPolicy.class);
+            context.refresh();
+
+            AuditSamplingPolicy bean = context.getBean(AuditSamplingPolicy.class);
+            assertEquals(0.25, bean.getSampleRate());
+        }
     }
 
     @Test

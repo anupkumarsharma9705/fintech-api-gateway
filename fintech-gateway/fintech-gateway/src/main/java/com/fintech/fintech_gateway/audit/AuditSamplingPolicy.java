@@ -6,6 +6,7 @@ import com.fintech.fintech_gateway.risk.RiskDecisionEngine.Decision;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
@@ -57,6 +58,12 @@ public class AuditSamplingPolicy {
     private final List<String> neverSamplePaths;
     private final byte[] sampleSalt;
 
+    /**
+     * Production constructor. Spring must be told which of the two
+     * constructors to use; the salt-injected one exists only as a test seam so
+     * a test can assert selection deterministically.
+     */
+    @Autowired
     public AuditSamplingPolicy(GatewayProperties properties, Environment environment) {
         this(properties, environment, randomSalt());
     }
