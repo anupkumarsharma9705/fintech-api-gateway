@@ -33,6 +33,9 @@ param(
     [string]$RateLimitAlgorithm = 'gcra',
     # 0 = derive from the mode: unlimited when saturated, 6000 when enforced.
     [int]$AbuseLimitPerIp = 0,
+    # The tenant whose admission state is reset between scenarios. The load
+    # generator sends no tenant header, so this is the gateway default.
+    [string]$Tenant = 'default',
     [switch]$SkipWarmup,
     [switch]$NoRebuild
 )
@@ -76,6 +79,32 @@ $compose = @(
     '-f', 'docker-compose.loadtest.yml'
 )
 
+function Get-TenantTag([string]$Value) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+        $hex = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        return $hex.Substring(0, 16)
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Reset-AdmissionState {
+    # A capacity scenario must start from a clean admission slate. The
+    # waf-block fixture intentionally blacklists the caller after four blocks
+    # (24 h block window, permanent blacklist); without this reset every later
+    # read from the same IP is a 403 and measures the blacklist, not capacity.
+    # Scoped to one tenant: never FLUSHALL, never touch another tenant.
+    $tenantTag = Get-TenantTag $Tenant
+    $pattern = "gw:v2:{t:$tenantTag}:*"
+    Write-Host "Resetting admission state for tenant '$Tenant' ($pattern)..." -ForegroundColor DarkGray
+    $script = "redis-cli --scan --pattern '$pattern' | while read -r key; do redis-cli DEL `"`$key`" >/dev/null; done"
+    docker compose @compose exec -T redis sh -c $script | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "admission reset failed (exit $LASTEXITCODE)" }
+}
+
 if (-not $NoRebuild) {
     Write-Host 'Building and starting stack (gateway -> sink upstream)...' -ForegroundColor Cyan
     docker compose @compose up -d --build --wait
@@ -99,6 +128,8 @@ for ($i = 0; $i -lt 60; $i++) {
 }
 if (-not $ready) { throw 'Gateway did not become ready. Run: docker compose logs gateway' }
 
+Reset-AdmissionState
+
 # ---- warmup -----------------------------------------------------------------
 if (-not $SkipWarmup) {
     Write-Host 'Warmup (10s, discarded)...' -ForegroundColor DarkGray
@@ -109,6 +140,10 @@ if (-not $SkipWarmup) {
         load-tests/capacity/capacity.js | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "k6 warmup failed (exit $LASTEXITCODE)" }
 }
+
+# The waf-block warmup deliberately trips the blacklist; the measured run must
+# not inherit it.
+Reset-AdmissionState
 
 # ---- measured run -----------------------------------------------------------
 $jsonOut = "load-tests/results/capacity-$tag.json"
@@ -134,6 +169,17 @@ $summaryPath = Join-Path $results 'capacity-summary.json'
 $summaryTagged = "load-tests/results/capacity-$tag.summary.json"
 if (-not (Test-Path $summaryPath)) {
     throw 'k6 produced no summary; refusing to record meta'
+}
+
+# A status outside the scenario's allowlist means the run measured something
+# other than the intended path (a blacklist, a WAF false positive, an upstream
+# failure). The k6 thresholds do not fail on that, so the harness must.
+$summary = Get-Content $summaryPath -Raw | ConvertFrom-Json
+if ($null -eq $summary.unexpected_status_rate) {
+    throw 'summary has no unexpected_status_rate; refusing to record meta'
+}
+if ($summary.unexpected_status_rate -gt 0) {
+    throw ("measured run produced unexpected statuses (rate {0}); refusing to record a contaminated artifact" -f $summary.unexpected_status_rate)
 }
 
 # ---- settle -----------------------------------------------------------------
@@ -176,6 +222,8 @@ $meta = [ordered]@{
     rate_limit_algorithm  = $RateLimitAlgorithm
     audit_sample_rate     = $AuditSampleRate
     rate_abuse_limit_per_ip = $AbuseLimitPerIp
+    capacity_tenant       = $Tenant
+    admission_reset       = $true
     git_sha               = $gitSha
     git_dirty             = $gitDirty
     host_os               = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription

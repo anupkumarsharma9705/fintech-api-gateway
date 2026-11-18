@@ -19,6 +19,7 @@ COOLDOWN="${COOLDOWN:-60}"
 AUDIT_SAMPLE_RATE="${AUDIT_SAMPLE_RATE:-1.0}"
 RATE_LIMIT_ALGORITHM="${RATE_LIMIT_ALGORITHM:-gcra}"
 ABUSE_LIMIT_PER_IP="${RATE_ABUSE_LIMIT_PER_IP:-}"
+TENANT="${CAPACITY_TENANT:-default}"
 
 [[ "$AUDIT_SAMPLE_RATE" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] \
   || { echo "AUDIT_SAMPLE_RATE must be within [0,1], got '$AUDIT_SAMPLE_RATE'"; exit 1; }
@@ -49,6 +50,20 @@ echo "==> admission: algorithm=$RATE_LIMIT_ALGORITHM sample_rate=$AUDIT_SAMPLE_R
 
 COMPOSE=(-f docker-compose.yml -f docker-compose.loadtest.yml)
 
+reset_admission_state() {
+  # A capacity scenario must start from a clean admission slate. The waf-block
+  # fixture intentionally blacklists the caller after four blocks (24 h block
+  # window, permanent blacklist); without this reset every later read from the
+  # same IP is a 403 and measures the blacklist, not capacity. Scoped to one
+  # tenant: never FLUSHALL, never touch another tenant.
+  local tenant_tag pattern
+  tenant_tag="$(printf '%s' "$TENANT" | sha256sum | cut -c1-16)"
+  pattern="gw:v2:{t:${tenant_tag}}:*"
+  echo "==> resetting admission state for tenant '$TENANT' ($pattern)"
+  docker compose "${COMPOSE[@]}" exec -T redis sh -c \
+    "redis-cli --scan --pattern '$pattern' | while read -r key; do redis-cli DEL \"\$key\" >/dev/null; done"
+}
+
 echo "==> starting stack (gateway -> sink upstream)"
 docker compose "${COMPOSE[@]}" up -d --build --wait
 
@@ -62,12 +77,18 @@ done
 curl -fsS -o /dev/null "http://localhost:8081/actuator/health/readiness" \
   || { echo "gateway not ready"; docker compose "${COMPOSE[@]}" logs --tail 100 gateway; exit 1; }
 
+reset_admission_state
+
 echo "==> warmup (10s, discarded)"
 k6 run --quiet \
   -e "SCENARIO=$SCENARIO" -e "RATE=100" -e "RAMP=5s" -e "HOLD=10s" \
   -e "P95_BUDGET=10000" -e "WARMUP=true" \
   -o "json=load-tests/results/_warmup.json" \
   load-tests/capacity/capacity.js >/dev/null
+
+# The waf-block warmup deliberately trips the blacklist; the measured run must
+# not inherit it.
+reset_admission_state
 
 echo "==> measured run: $SCENARIO @ ${RATE} req/s for $HOLD"
 JSON_OUT="load-tests/results/capacity-${TAG}.json"
@@ -90,6 +111,20 @@ if [[ "$K6_EXIT" -ne 0 && "$K6_EXIT" -ne 99 ]]; then
 fi
 if [[ ! -f load-tests/results/capacity-summary.json ]]; then
   echo "k6 produced no summary; refusing to record meta"
+  exit 1
+fi
+
+# A status outside the scenario's allowlist means the run measured something
+# other than the intended path (a blacklist, a WAF false positive, an upstream
+# failure). The k6 thresholds do not fail on that, so the harness must.
+UNEXPECTED="$(grep -o '"unexpected_status_rate"[[:space:]]*:[[:space:]]*[0-9.eE+-]*' \
+  load-tests/results/capacity-summary.json | head -1 | sed 's/.*:[[:space:]]*//' || true)"
+if [[ -z "$UNEXPECTED" ]]; then
+  echo "could not read unexpected_status_rate from summary; refusing to record meta"
+  exit 1
+fi
+if awk -v v="$UNEXPECTED" 'BEGIN { exit !(v > 0) }'; then
+  echo "measured run produced unexpected statuses (rate $UNEXPECTED); refusing to record a contaminated artifact"
   exit 1
 fi
 
@@ -126,6 +161,8 @@ cat > "load-tests/results/capacity-${TAG}.meta.json" <<EOF
   "rate_limit_algorithm": "${RATE_LIMIT_ALGORITHM}",
   "audit_sample_rate": ${AUDIT_SAMPLE_RATE},
   "rate_abuse_limit_per_ip": ${ABUSE_LIMIT_PER_IP},
+  "capacity_tenant": "${TENANT}",
+  "admission_reset": true,
   "git_sha": "${GIT_SHA}",
   "git_dirty": ${GIT_DIRTY},
   "host_os": "$(uname -srm)",
