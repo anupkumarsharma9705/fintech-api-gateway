@@ -128,9 +128,7 @@ $k6Exit = $LASTEXITCODE
 # cross the latency budget, and that artifact is still a valid result.
 # Any other non-zero exit means the run itself failed and must not be
 # published as a measurement.
-if ($k6Exit -ne 0 -and $k6Exit -ne 99) {
-    throw "k6 measured run failed (exit $k6Exit)"
-}
+if ($k6Exit -ne 0 -and $k6Exit -ne 99) { throw "k6 measured run failed (exit $k6Exit)" }
 
 $summaryPath = Join-Path $results 'capacity-summary.json'
 $summaryTagged = "load-tests/results/capacity-$tag.summary.json"
@@ -205,4 +203,8 @@ Write-Host "  $metricsPath"
 Write-Host ''
 Write-Host 'Publish only with the meta.json - a rate without hardware is not a result.' -ForegroundColor Yellow
 
+# Exit code is k6's own code: 0 = latency thresholds met, 99 = a threshold was
+# crossed (still a valid, publishable saturated measurement - the summary,
+# meta.json and metrics snapshot are written before this point). Any other
+# non-zero value means the harness itself failed and no evidence was recorded.
 exit $k6Exit
