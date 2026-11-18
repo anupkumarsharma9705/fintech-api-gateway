@@ -17,9 +17,15 @@ param(
 
     [int]$Rate = 500,
     [string]$Hold = '120s',
-    [string]$Ramp = '20s',
+    # 0s measures a constant-arrival window, so the reported rate is the
+    # offered rate instead of a ramp-diluted average. Pass 20s to reproduce
+    # the pre-Phase-5 schedule.
+    [string]$Ramp = '0s',
     [double]$P95Budget = 50,
     [int]$GatewayCpus = 2,
+    # 0 = derive from the rate. Recorded with the result: a run that exhausts
+    # the VU pool measures the generator, not the gateway.
+    [int]$MaxVus = 0,
     # Requests that already timed out can keep the gateway busy for up to the
     # k6 timeout after a run ends. Without a settle window the next rate step
     # measures the previous step's backlog instead of its own.
@@ -36,6 +42,11 @@ param(
     # The tenant whose admission state is reset between scenarios. The load
     # generator sends no tenant header, so this is the gateway default.
     [string]$Tenant = 'default',
+    # dev supplies the fixture switch (auth off); capacity removes console log
+    # I/O, mirroring the prod logging shape. Override with "dev" to reproduce
+    # the pre-Phase-5 logging cost.
+    [string]$Profiles = 'dev,capacity',
+    [switch]$VirtualThreads,
     [switch]$SkipWarmup,
     [switch]$NoRebuild
 )
@@ -72,6 +83,12 @@ $env:RATE_LIMIT_ALGORITHM = $RateLimitAlgorithm
 Write-Host ("Admission: algorithm=$RateLimitAlgorithm sample_rate=$AuditSampleRate abuse_per_ip=$AbuseLimitPerIp") -ForegroundColor Cyan
 
 $env:GATEWAY_CPUS = "$GatewayCpus"
+# Compose recreates the gateway when these change, which also resets the
+# Prometheus counters - the meta records the profile so a counter reset is
+# explainable after the fact.
+$env:SPRING_PROFILES_ACTIVE = $Profiles
+$env:VIRTUAL_THREADS = if ($VirtualThreads) { 'true' } else { 'false' }
+Write-Host ("Logging: profiles=$Profiles virtual_threads=$($env:VIRTUAL_THREADS)") -ForegroundColor Cyan
 
 # ---- stack ------------------------------------------------------------------
 $compose = @(
@@ -88,6 +105,57 @@ function Get-TenantTag([string]$Value) {
     }
     finally {
         $sha.Dispose()
+    }
+}
+
+function Start-ResourceSampler([string]$OutFile) {
+    # The end-of-run `docker stats` snapshot is taken after the cooldown, so it
+    # reports idle CPU. Peak CPU during the measured window is the number the
+    # acceptance criterion talks about, so sample it while k6 runs.
+    Remove-Item -Force $OutFile -ErrorAction SilentlyContinue
+    return Start-Job -ScriptBlock {
+        param($out)
+        while ($true) {
+            $line = docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' 2>$null |
+                Where-Object { $_ -match 'fintech-gateway-gateway-1\|' } |
+                Select-Object -First 1
+            if ($line) {
+                $parts = $line -split '\|'
+                Add-Content -Path $out -Value ("{0}|{1}|{2}" -f (Get-Date -Format o), $parts[1], $parts[2])
+            }
+            Start-Sleep -Milliseconds 1000
+        }
+    } -ArgumentList $OutFile
+}
+
+function Stop-ResourceSampler($Job, [string]$OutFile) {
+    if ($null -eq $Job) { return $null }
+    Stop-Job $Job -ErrorAction SilentlyContinue
+    Remove-Job $Job -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $OutFile)) { return $null }
+    $samples = Get-Content $OutFile | Where-Object { $_ -match '\|' }
+    if (-not $samples) { return $null }
+    $cpu = @(); $mem = @()
+    foreach ($s in $samples) {
+        $p = $s -split '\|'
+        if ($p.Count -lt 3) { continue }
+        $cpu += [double]($p[1] -replace '[^0-9.]', '')
+        # "516.5MiB / 1GiB" or "1.2GiB / 1GiB"
+        $m = [regex]::Match($p[2], '([0-9.]+)\s*(KiB|MiB|GiB)')
+        if ($m.Success) {
+            $v = [double]$m.Groups[1].Value
+            switch ($m.Groups[2].Value) {
+                'KiB' { $v = $v / 1024 }
+                'GiB' { $v = $v * 1024 }
+            }
+            $mem += $v
+        }
+    }
+    return [ordered]@{
+        samples        = $samples.Count
+        cpu_peak_pct   = if ($cpu) { ($cpu | Measure-Object -Maximum).Maximum } else { $null }
+        cpu_mean_pct   = if ($cpu) { [math]::Round(($cpu | Measure-Object -Average).Average, 1) } else { $null }
+        mem_peak_mib   = if ($mem) { [math]::Round(($mem | Measure-Object -Maximum).Maximum, 1) } else { $null }
     }
 }
 
@@ -149,16 +217,22 @@ Reset-AdmissionState
 $jsonOut = "load-tests/results/capacity-$tag.json"
 Write-Host "Running $Scenario at ${Rate} req/s for $Hold ..." -ForegroundColor Cyan
 
+$resourceFile = Join-Path ([IO.Path]::GetTempPath()) "capacity-resources-$tag.txt"
+$sampler = Start-ResourceSampler $resourceFile
+
 k6 run `
     -e "SCENARIO=$Scenario" `
     -e "RATE=$Rate" `
     -e "RAMP=$Ramp" `
     -e "HOLD=$Hold" `
     -e "P95_BUDGET=$P95Budget" `
+    -e "MAX_VUS=$MaxVus" `
     -o "json=$jsonOut" `
     load-tests/capacity/capacity.js
 
 $k6Exit = $LASTEXITCODE
+# Stop sampling before the cooldown, otherwise idle time is averaged in.
+$resources = Stop-ResourceSampler $sampler $resourceFile
 # k6 exits 99 when a threshold is crossed. A saturated step is expected to
 # cross the latency budget, and that artifact is still a valid result.
 # Any other non-zero exit means the run itself failed and must not be
@@ -180,6 +254,14 @@ if ($null -eq $summary.unexpected_status_rate) {
 }
 if ($summary.unexpected_status_rate -gt 0) {
     throw ("measured run produced unexpected statuses (rate {0}); refusing to record a contaminated artifact" -f $summary.unexpected_status_rate)
+}
+
+# A run that ran out of VUs did not offer the load it claims to have offered.
+# It is still evidence that the gateway collapsed, but it is not a ceiling
+# measurement, so the meta must carry the flag rather than let a reader infer
+# a capacity number from a generator-starved run.
+if ($summary.generator_limited) {
+    Write-Warning ("load generator exhausted its VU pool: {0} dropped iterations, executed {1:P1} of the scheduled load. This run cannot support a ceiling claim." -f $summary.dropped_iterations, $summary.executed_ratio)
 }
 
 # ---- settle -----------------------------------------------------------------
@@ -224,6 +306,14 @@ $meta = [ordered]@{
     rate_abuse_limit_per_ip = $AbuseLimitPerIp
     capacity_tenant       = $Tenant
     admission_reset       = $true
+    gateway_profiles      = $Profiles
+    virtual_threads       = $env:VIRTUAL_THREADS
+    max_vus               = $MaxVus
+    window                = $summary.window
+    scheduled_iterations  = $summary.scheduled_iterations
+    executed_ratio        = $summary.executed_ratio
+    dropped_iterations    = $summary.dropped_iterations
+    generator_limited     = $summary.generator_limited
     git_sha               = $gitSha
     git_dirty             = $gitDirty
     host_os               = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
@@ -236,6 +326,9 @@ $meta = [ordered]@{
         summary = $summaryTagged
         metrics = $metricsPath
     }
+    # Sampled DURING the run, unlike container_stats which is a post-cooldown
+    # idle snapshot kept only for memory sanity.
+    resources             = $resources
     container_stats = $dockerStats
 }
 

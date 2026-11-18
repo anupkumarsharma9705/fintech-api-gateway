@@ -30,13 +30,33 @@ import { randomUUID } from 'k6/crypto';
 const BASE = __ENV.BASE_URL || 'http://localhost:8081';
 const SCENARIO = (__ENV.SCENARIO || 'read').toLowerCase();
 const RATE = Number(__ENV.RATE || 200);
+// RAMP=0 measures a constant-arrival window: the whole run is the hold, so the
+// reported rate is the offered rate rather than a ramp-diluted average.
 const RAMP = __ENV.RAMP || '20s';
 const HOLD = __ENV.HOLD || '120s';
 const P95_BUDGET = Number(__ENV.P95_BUDGET || 50);
+// Explicit VU ceiling. It is recorded with the result because a run that
+// exhausts it measures the generator, not the gateway.
+const MAX_VUS = Number(__ENV.MAX_VUS || 0);
 // Warmup runs burn JIT and connection pools; their summary must not overwrite
 // the artifact from the measured run. k6 v2 removed --no-summary, so the
 // script itself decides whether to emit one.
 const WARMUP = __ENV.WARMUP === 'true';
+
+function parseDuration(value) {
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)$/.exec(String(value).trim());
+  if (!m) throw new Error(`Unsupported duration '${value}' (use 30s, 1m, 1h)`);
+  const n = Number(m[1]);
+  if (m[2] === 'ms') return n / 1000;
+  if (m[2] === 'm') return n * 60;
+  if (m[2] === 'h') return n * 3600;
+  return n;
+}
+
+const NO_RAMP = RAMP === '0' || RAMP === '0s';
+const HOLD_SECONDS = parseDuration(HOLD);
+const RAMP_SECONDS = NO_RAMP ? 0 : parseDuration(RAMP);
+const TARGET_VUS = MAX_VUS > 0 ? MAX_VUS : Math.max(500, RATE * 2);
 
 const ok = new Counter('cap_ok');
 const blocked = new Counter('cap_blocked');
@@ -47,25 +67,43 @@ const unexpected = new Rate('cap_unexpected_status_rate');
 // connection pools reach steady state before the measured hold window.
 const quarter = Math.max(1, Math.round(RATE / 4));
 
-export const options = {
-  discardResponseBodies: true,
-  // k6 only computes the percentile keys it is asked for. Without this the
-  // published summary would silently report p50/p99 as zero.
-  summaryTrendStats: ['avg', 'min', 'med', 'p(50)', 'p(90)', 'p(95)', 'p(99)', 'max'],
-  scenarios: {
-    capacity: {
+// Analytic schedule size. Comparing it with executed iterations is how a run
+// proves the generator actually offered the load it claims to have offered.
+const scheduledIterations = NO_RAMP
+  ? Math.round(RATE * HOLD_SECONDS)
+  : Math.round(quarter * 5 + ((quarter + RATE) / 2) * RAMP_SECONDS + RATE * HOLD_SECONDS);
+
+const capacityScenario = NO_RAMP
+  ? {
+      executor: 'constant-arrival-rate',
+      rate: RATE,
+      timeUnit: '1s',
+      duration: HOLD,
+      preAllocatedVUs: Math.max(50, Math.round(RATE * 0.2)),
+      maxVUs: TARGET_VUS,
+      gracefulStop: '15s',
+    }
+  : {
       executor: 'ramping-arrival-rate',
       startRate: quarter,
       timeUnit: '1s',
       preAllocatedVUs: Math.max(50, Math.round(RATE * 0.2)),
-      maxVUs: Math.max(500, RATE * 2),
+      maxVUs: TARGET_VUS,
       gracefulStop: '15s',
       stages: [
         { target: quarter, duration: '5s' },
         { target: RATE, duration: RAMP },
         { target: RATE, duration: HOLD },
       ],
-    },
+    };
+
+export const options = {
+  discardResponseBodies: true,
+  // k6 only computes the percentile keys it is asked for. Without this the
+  // published summary would silently report p50/p99 as zero.
+  summaryTrendStats: ['avg', 'min', 'med', 'p(50)', 'p(90)', 'p(95)', 'p(99)', 'max'],
+  scenarios: {
+    capacity: capacityScenario,
   },
   thresholds: {
     // A 5xx under load is a correctness failure, not a slow path.
@@ -172,12 +210,29 @@ export function handleSummary(data) {
 
   const m = data.metrics;
   const dur = m.http_req_duration ? m.http_req_duration.values : {};
+  const count = (name) => (m[name] ? m[name].values.count : 0);
+  const requests = count('http_reqs');
+  const iterations = count('iterations');
+  // Non-zero means k6 had no free VU at the offered rate: the shortfall is at
+  // least partly the generator's, so the run cannot claim a ceiling.
+  const dropped = count('dropped_iterations');
+  const vusMax = m.vus_max ? (m.vus_max.values.max || m.vus_max.values.value) : 0;
+
   const summary = {
     scenario: SCENARIO,
     target_rate: RATE,
     held_for: HOLD,
-    requests: m.http_reqs ? m.http_reqs.values.count : 0,
+    ramp: RAMP,
+    window: NO_RAMP ? 'constant' : 'ramping',
+    max_vus: TARGET_VUS,
+    scheduled_iterations: scheduledIterations,
+    requests,
     achieved_rps: m.http_reqs ? m.http_reqs.values.rate : 0,
+    iterations,
+    executed_ratio: scheduledIterations > 0 ? iterations / scheduledIterations : 0,
+    dropped_iterations: dropped,
+    generator_limited: dropped > 0,
+    vus_max_observed: vusMax,
     failed_requests: m.http_req_failed ? m.http_req_failed.values.passes : 0,
     server_error_rate: m.cap_server_error_rate
       ? m.cap_server_error_rate.values.rate
