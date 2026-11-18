@@ -108,6 +108,9 @@ $rows = foreach ($metaFile in $metas) {
         P50           = [double]$summary.p50_ms
         P95           = [double]$summary.p95_ms
         P99           = [double]$summary.p99_ms
+        SteadyP95     = if ($null -ne $summary.steady_p95_ms) { [double]$summary.steady_p95_ms } else { $null }
+        ColdP95       = if ($null -ne $summary.cold_p95_ms) { [double]$summary.cold_p95_ms } else { $null }
+        SteadySamples = if ($null -ne $summary.steady_requests) { [int]$summary.steady_requests } else { $null }
         ServerErr     = [double]$summary.server_error_rate
         Unexpected    = [double]$summary.unexpected_status_rate
         PersistedCrit = Get-Metric $metrics 'gateway_audit_persisted_total' @{ dataset = 'critical' }
@@ -170,6 +173,9 @@ foreach ($row in $rows) {
     if ($row.Unexpected -gt 0) { $reasons += "unexpected_status=$($row.Unexpected)" }
     if ($row.ServerErr -gt 0.001) { $reasons += "5xx=$($row.ServerErr)" }
     if ($kind -eq 'reset') { $reasons += 'counter_reset' }
+    # A summary without steady-state samples cannot support an SLO claim, even
+    # if its whole-window p95 looks good.
+    if ($null -ne $row.SteadySamples -and $row.SteadySamples -eq 0) { $reasons += 'no_steady_samples' }
 
     $row | Add-Member NoteProperty RejectReasons $reasons
     $row | Add-Member NoteProperty Verdict $(if ($reasons.Count -eq 0) { 'PUBLISH' } else { 'REJECT' })
@@ -180,13 +186,14 @@ foreach ($row in $rows) {
 }
 
 if ($Markdown) {
-    '| Started (local) | Scenario | Rate | Window | Exit | Requests | Generator | p50 ms | p95 ms | p99 ms | 5xx | Unexpected | Audit persisted (crit/samp) | Audit dropped (crit/samp) | Queue after (crit/samp) | Audit chain | Verdict |'
+    '| Started (local) | Scenario | Rate | Window | Exit | Requests | Generator | p50 ms | p95 ms (whole/steady) | p99 ms | 5xx | Unexpected | Audit persisted (crit/samp) | Audit dropped (crit/samp) | Queue after (crit/samp) | Audit chain | Verdict |'
     '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
     foreach ($r in $rows) {
         $generator = if ($r.GeneratorLimited) { "exhausted ($($r.DroppedIters))" } else { 'ok' }
-        '{0} | {1} | {2} | {3} | {4} | {5:N0} | {6} | {7:N1} | {8:N1} | {9:N1} | {10:P2} | {11:P2} | {12:N0} / {13:N0} | {14:N0} / {15:N0} | {16:N0} / {17:N0} | {18} | {19} |' -f `
+        $p95cell = if ($null -ne $r.SteadyP95) { '{0:N1} / {1:N1}' -f $r.P95, $r.SteadyP95 } else { '{0:N1}' -f $r.P95 }
+        '{0} | {1} | {2} | {3} | {4} | {5:N0} | {6} | {7:N1} | {8} | {9:N1} | {10:P2} | {11:P2} | {12:N0} / {13:N0} | {14:N0} / {15:N0} | {16:N0} / {17:N0} | {18} | {19} |' -f `
             $r.StartedAt.ToString('yyyy-MM-dd HH:mm'), $r.Scenario, $r.Rate, $r.Window, $r.Exit,
-        $r.Requests, $generator, $r.P50, $r.P95, $r.P99, $r.ServerErr, $r.Unexpected,
+        $r.Requests, $generator, $r.P50, $p95cell, $r.P99, $r.ServerErr, $r.Unexpected,
         $r.PersistedCritDelta, $r.PersistedSampDelta,
         $r.DroppedCritDelta, $r.DroppedSampDelta,
         $r.DepthCrit, $r.DepthSamp, $r.Chain, $r.Verdict
@@ -197,9 +204,10 @@ else {
         $suffix = if ($r.RejectReasons.Count -gt 0) { ' <- ' + ($r.RejectReasons -join ',') } else { '' }
         $generator = if ($r.GeneratorLimited) { " generator_exhausted=$($r.DroppedIters)" } else { '' }
         $chain = if ($r.Chain -ne 'delta') { " audit=$($r.Chain)" } else { '' }
-        '{0}  {1,-9} {2,5} rps  sample={3,-3}  {4,-7} exit={5,-2} p95={6,9:N1} ms  persisted={7:N0}/{8:N0} dropped={9:N0}/{10:N0}{11}{12}{13}' -f `
+        $p95 = if ($null -ne $r.SteadyP95) { '{0:N1}/{1:N1}' -f $r.P95, $r.SteadyP95 } else { '{0:N1}' -f $r.P95 }
+        '{0}  {1,-9} {2,5} rps  sample={3,-3}  {4,-7} exit={5,-2} p95={6,15} ms  persisted={7:N0}/{8:N0} dropped={9:N0}/{10:N0}{11}{12}{13}' -f `
             $r.StartedAt.ToString('yyyy-MM-dd HH:mm'), $r.Scenario, $r.Rate, $r.SampleRate,
-        $r.Verdict, $r.Exit, $r.P95, $r.PersistedCritDelta, $r.PersistedSampDelta,
+        $r.Verdict, $r.Exit, $p95, $r.PersistedCritDelta, $r.PersistedSampDelta,
         $r.DroppedCritDelta, $r.DroppedSampDelta, $generator, $chain, $suffix
     }
 }

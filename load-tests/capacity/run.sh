@@ -111,39 +111,49 @@ JSON_OUT="load-tests/results/capacity-${TAG}.json"
 # The post-run `docker stats` snapshot is taken after the cooldown, so it
 # reports idle CPU. Peak CPU during the measured window is what the acceptance
 # criterion talks about, so sample continuously while k6 runs.
+#
+# One streaming CLI process, not `--no-stream` in a loop: on Docker Desktop a
+# cold `docker stats` call took 2-10 s and the repeated spawns produced 10 s
+# stalls in the latency data. The stream costs one line per second.
 RESOURCE_FILE="$(mktemp)"
-(
-  while true; do
-    line="$(docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' 2>/dev/null \
-      | grep 'fintech-gateway-gateway-1|' | head -1 || true)"
-    if [[ -n "$line" ]]; then
-      printf '%s|%s\n' "$(date -u +%FT%T)" "$line" >> "$RESOURCE_FILE"
-    fi
-    sleep 1
-  done
-) &
-SAMPLER_PID=$!
+if [[ "${NO_SAMPLER:-0}" == "1" ]]; then
+  echo "==> resource sampler disabled (NO_SAMPLER=1)"
+  SAMPLER_PID=""
+else
+  docker stats fintech-gateway-gateway-1 \
+    --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' > "$RESOURCE_FILE" 2>/dev/null &
+  SAMPLER_PID=$!
+fi
 
 set +e
 k6 run \
   -e "SCENARIO=$SCENARIO" -e "RATE=$RATE" -e "RAMP=$RAMP" -e "HOLD=$HOLD" \
-  -e "P95_BUDGET=$P95_BUDGET" -e "MAX_VUS=$MAX_VUS" \
+  -e "P95_BUDGET=$P95_BUDGET" -e "STEADY_AFTER=10s" -e "MAX_VUS=$MAX_VUS" \
   -o "json=$JSON_OUT" \
   load-tests/capacity/capacity.js
 K6_EXIT=$?
 set -e
 
 # Stop sampling before the cooldown, otherwise idle time is averaged in.
-kill "$SAMPLER_PID" 2>/dev/null || true
-wait "$SAMPLER_PID" 2>/dev/null || true
+if [[ -n "$SAMPLER_PID" ]]; then
+  kill "$SAMPLER_PID" 2>/dev/null || true
+  wait "$SAMPLER_PID" 2>/dev/null || true
+fi
 
 RESOURCE_SAMPLES=0
 CPU_PEAK=null
 MEM_PEAK=null
 if [[ -s "$RESOURCE_FILE" ]]; then
-  RESOURCE_SAMPLES="$(wc -l < "$RESOURCE_FILE" | tr -d ' ')"
-  CPU_PEAK="$(awk -F'|' '{c=$3; gsub(/%/,"",c); if (c+0>m) m=c+0} END { if (NR) printf "%.2f", m }' "$RESOURCE_FILE")"
-  MEM_PEAK="$(awk -F'|' '{v=$4; sub(/^[ \t]+/,"",v); split(v,a," "); n=a[1]; u=n; gsub(/[0-9.]/,"",u); gsub(/[^0-9.]/,"",n); val=n+0; if (u=="GiB") val*=1024; else if (u=="KiB") val/=1024; if (val>m) m=val} END { if (NR) printf "%.1f", m }' "$RESOURCE_FILE")"
+  # `docker stats` writes ANSI cursor control even when redirected.
+  CLEAN_RESOURCE="$(mktemp)"
+  sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g' "$RESOURCE_FILE" \
+    | tr -d '\r' | grep '^fintech-gateway-gateway-1|' > "$CLEAN_RESOURCE" || true
+  if [[ -s "$CLEAN_RESOURCE" ]]; then
+    RESOURCE_SAMPLES="$(wc -l < "$CLEAN_RESOURCE" | tr -d ' ')"
+    CPU_PEAK="$(awk -F'|' '{c=$2; gsub(/%/,"",c); if (c+0>m) m=c+0} END { if (NR) printf "%.2f", m }' "$CLEAN_RESOURCE")"
+    MEM_PEAK="$(awk -F'|' '{v=$3; sub(/^[ \t]+/,"",v); split(v,a," "); n=a[1]; u=n; gsub(/[0-9.]/,"",u); gsub(/[^0-9.]/,"",n); val=n+0; if (u=="GiB") val*=1024; else if (u=="KiB") val/=1024; if (val>m) m=val} END { if (NR) printf "%.1f", m }' "$CLEAN_RESOURCE")"
+  fi
+  rm -f "$CLEAN_RESOURCE"
 fi
 
 # k6 exits 99 when a threshold is crossed. A saturated step is expected to
@@ -186,6 +196,9 @@ DROPPED="$(json_number dropped_iterations)"
 EXECUTED_RATIO="$(json_number executed_ratio)"
 SCHEDULED="$(json_number scheduled_iterations)"
 GENERATOR_LIMITED="$(json_literal generator_limited)"
+STEADY_AFTER="$(json_number steady_after_s)"
+STEADY_P95="$(json_number steady_p95_ms)"
+COLD_P95="$(json_number cold_p95_ms)"
 WINDOW="$(grep -o '"window"[[:space:]]*:[[:space:]]*"[a-z]*"' load-tests/results/capacity-summary.json \
   | head -1 | sed 's/.*:[[:space:]]*"//; s/"$//' || true)"
 
@@ -194,6 +207,9 @@ EXECUTED_RATIO="${EXECUTED_RATIO:-0}"
 SCHEDULED="${SCHEDULED:-0}"
 GENERATOR_LIMITED="${GENERATOR_LIMITED:-false}"
 WINDOW="${WINDOW:-unknown}"
+STEADY_AFTER="${STEADY_AFTER:-null}"
+STEADY_P95="${STEADY_P95:-null}"
+COLD_P95="${COLD_P95:-null}"
 
 # A run that ran out of VUs did not offer the load it claims to have offered.
 # It is still evidence that the gateway collapsed, but it is not a ceiling
@@ -229,6 +245,9 @@ cat > "load-tests/results/capacity-${TAG}.meta.json" <<EOF
   "hold": "${HOLD}",
   "ramp": "${RAMP}",
   "p95_budget_ms": ${P95_BUDGET},
+  "steady_after_s": ${STEADY_AFTER},
+  "steady_p95_ms": ${STEADY_P95},
+  "cold_p95_ms": ${COLD_P95},
   "k6_exit_code": ${K6_EXIT},
   "gateway_cpus": ${GATEWAY_CPUS},
   "cooldown_s": ${COOLDOWN},

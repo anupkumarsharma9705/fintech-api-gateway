@@ -25,6 +25,7 @@
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter, Rate } from 'k6/metrics';
+import exec from 'k6/execution';
 import { randomUUID } from 'k6/crypto';
 
 const BASE = __ENV.BASE_URL || 'http://localhost:8081';
@@ -35,6 +36,16 @@ const RATE = Number(__ENV.RATE || 200);
 const RAMP = __ENV.RAMP || '20s';
 const HOLD = __ENV.HOLD || '120s';
 const P95_BUDGET = Number(__ENV.P95_BUDGET || 50);
+// The first seconds of a constant-arrival run are cold: new TCP connections,
+// JIT, and pool growth happen at the full offered rate. A whole-window p95
+// then describes the start-up transient, not the gateway. Requests are tagged
+// cold/steady so the summary can report both. The default matches the
+// runner's 10 s warmup.
+const STEADY_AFTER_SECONDS = parseDuration(__ENV.STEADY_AFTER || '10s');
+// A cold start that takes more than a second is a defect, not a measurement
+// artifact. This threshold also materialises the cold submetric in the
+// summary, so the transient is reported next to steady state.
+const COLD_P95_BUDGET = Number(__ENV.COLD_P95_BUDGET || 1000);
 // Explicit VU ceiling. It is recorded with the result because a run that
 // exhausts it measures the generator, not the gateway.
 const MAX_VUS = Number(__ENV.MAX_VUS || 0);
@@ -101,7 +112,7 @@ export const options = {
   discardResponseBodies: true,
   // k6 only computes the percentile keys it is asked for. Without this the
   // published summary would silently report p50/p99 as zero.
-  summaryTrendStats: ['avg', 'min', 'med', 'p(50)', 'p(90)', 'p(95)', 'p(99)', 'max'],
+  summaryTrendStats: ['count', 'avg', 'min', 'med', 'p(50)', 'p(90)', 'p(95)', 'p(99)', 'max'],
   scenarios: {
     capacity: capacityScenario,
   },
@@ -109,10 +120,25 @@ export const options = {
     // A 5xx under load is a correctness failure, not a slow path.
     cap_server_error_rate: ['rate<0.001'],
     http_req_duration: [`p(95)<${P95_BUDGET}`],
+    // The SLO is about steady state. Thresholding the whole window lets a
+    // cold-start spike fail a run that is healthy once warm, and lets a warm
+    // regression hide behind a fast start.
+    'http_req_duration{phase:steady}': [`p(95)<${P95_BUDGET}`],
+    'http_req_duration{phase:cold}': [`p(95)<${COLD_P95_BUDGET}`],
   },
 };
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
+// Every request carries its phase so the summary can separate cold start from
+// steady state. exec.scenario.startTime is the scenario epoch, not the VU's,
+// so VUs that start late are still classified correctly.
+function req(method, url, body, params) {
+  const p = params || {};
+  const steady = Date.now() - exec.scenario.startTime >= STEADY_AFTER_SECONDS * 1000;
+  p.tags = { ...(p.tags || {}), phase: steady ? 'steady' : 'cold' };
+  return http.request(method, url, body, p);
+}
 
 // Accepted status codes per scenario. In `enforced` mode the rate limiter
 // legitimately returns 429; the capacity of the limiter is not the topic here.
@@ -126,12 +152,12 @@ const ACCEPT = {
 };
 
 function read() {
-  return http.get(`${BASE}/api/account/balance?accountId=ACC123`);
+  return req('GET', `${BASE}/api/account/balance?accountId=ACC123`);
 }
 
 function write(body) {
   const key = randomUUID();
-  return http.post(`${BASE}/api/payments/transfer`, body(key), {
+  return req('POST', `${BASE}/api/payments/transfer`, body(key), {
     headers: { ...JSON_HEADERS, 'Idempotency-Key': key },
   });
 }
@@ -152,7 +178,8 @@ function paymentBody(key, note) {
 const BIG_NOTE = 'a'.repeat(4096);
 
 function attack() {
-  return http.get(
+  return req(
+    'GET',
     `${BASE}/api/account/balance?accountId=ACC123%27%20OR%20%271%27%3D%271`,
   );
 }
@@ -160,7 +187,7 @@ function attack() {
 function pick() {
   switch (SCENARIO) {
     case 'health':
-      return http.get(`${BASE}/health`);
+      return req('GET', `${BASE}/health`);
     case 'read':
       return read();
     case 'write':
@@ -210,6 +237,16 @@ export function handleSummary(data) {
 
   const m = data.metrics;
   const dur = m.http_req_duration ? m.http_req_duration.values : {};
+  // Tag-filtered submetrics are materialised because options.thresholds
+  // references them. If a future k6 stops doing that, the fields stay zero and
+  // the evidence gate rejects the run rather than silently publishing a
+  // whole-window number as steady state.
+  const steady = m['http_req_duration{phase:steady}']
+    ? m['http_req_duration{phase:steady}'].values
+    : {};
+  const cold = m['http_req_duration{phase:cold}']
+    ? m['http_req_duration{phase:cold}'].values
+    : {};
   const count = (name) => (m[name] ? m[name].values.count : 0);
   const requests = count('http_reqs');
   const iterations = count('iterations');
@@ -244,6 +281,12 @@ export function handleSummary(data) {
     p95_ms: dur['p(95)'] || 0,
     p99_ms: dur['p(99)'] || 0,
     max_ms: dur.max || 0,
+    steady_after_s: STEADY_AFTER_SECONDS,
+    steady_requests: steady.count || 0,
+    steady_p50_ms: steady['p(50)'] || 0,
+    steady_p95_ms: steady['p(95)'] || 0,
+    steady_p99_ms: steady['p(99)'] || 0,
+    cold_p95_ms: cold['p(95)'] || 0,
   };
 
   return {

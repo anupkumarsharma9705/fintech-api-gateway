@@ -48,6 +48,9 @@ param(
     [string]$Profiles = 'dev,capacity',
     [switch]$VirtualThreads,
     [switch]$SkipWarmup,
+    # Disable resource sampling entirely. Only for A/B runs that need to prove
+    # the sampler is not influencing the latency under test.
+    [switch]$NoSampler,
     [switch]$NoRebuild
 )
 
@@ -113,28 +116,35 @@ function Start-ResourceSampler([string]$OutFile) {
     # The end-of-run `docker stats` snapshot is taken after the cooldown, so it
     # reports idle CPU. Peak CPU during the measured window is the number the
     # acceptance criterion talks about, so sample it while k6 runs.
+    #
+    # The first version spawned `docker stats --no-stream` every ~1 s. On
+    # Docker Desktop each call took 2-10 s, and the loop competed with the
+    # gateway for host CPU: at 500 rps it produced 10 s stalls in which p50
+    # rose from 2 ms to 15 ms for every request. That is a measurement
+    # artifact, not gateway behaviour. One streaming CLI process removes the
+    # per-sample spawn; the only recurring cost is one line per second.
     Remove-Item -Force $OutFile -ErrorAction SilentlyContinue
-    return Start-Job -ScriptBlock {
-        param($out)
-        while ($true) {
-            $line = docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' 2>$null |
-                Where-Object { $_ -match 'fintech-gateway-gateway-1\|' } |
-                Select-Object -First 1
-            if ($line) {
-                $parts = $line -split '\|'
-                Add-Content -Path $out -Value ("{0}|{1}|{2}" -f (Get-Date -Format o), $parts[1], $parts[2])
-            }
-            Start-Sleep -Milliseconds 1000
-        }
-    } -ArgumentList $OutFile
+    $errFile = "$OutFile.err"
+    Remove-Item -Force $errFile -ErrorAction SilentlyContinue
+    return Start-Process -FilePath 'docker' `
+        -ArgumentList @('stats', 'fintech-gateway-gateway-1', '--format', '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}') `
+        -RedirectStandardOutput $OutFile `
+        -RedirectStandardError $errFile `
+        -NoNewWindow -PassThru
 }
 
-function Stop-ResourceSampler($Job, [string]$OutFile) {
-    if ($null -eq $Job) { return $null }
-    Stop-Job $Job -ErrorAction SilentlyContinue
-    Remove-Job $Job -Force -ErrorAction SilentlyContinue
+function Stop-ResourceSampler($Process, [string]$OutFile) {
+    if ($null -eq $Process) { return $null }
+    if (-not $Process.HasExited) {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $Process.Id -Timeout 5 -ErrorAction SilentlyContinue
+    }
     if (-not (Test-Path $OutFile)) { return $null }
-    $samples = Get-Content $OutFile | Where-Object { $_ -match '\|' }
+    # `docker stats` writes ANSI cursor control even when redirected.
+    $esc = [char]27
+    $samples = Get-Content $OutFile |
+        ForEach-Object { ($_ -replace "$esc\[[0-9;?]*[A-Za-z]", '') -replace "`r", '' } |
+        Where-Object { $_ -match '^fintech-gateway-gateway-1\|' }
     if (-not $samples) { return $null }
     $cpu = @(); $mem = @()
     foreach ($s in $samples) {
@@ -219,7 +229,13 @@ $jsonOut = "load-tests/results/capacity-$tag.json"
 Write-Host "Running $Scenario at ${Rate} req/s for $Hold ..." -ForegroundColor Cyan
 
 $resourceFile = Join-Path ([IO.Path]::GetTempPath()) "capacity-resources-$tag.txt"
-$sampler = Start-ResourceSampler $resourceFile
+if ($NoSampler) {
+    Write-Host 'Resource sampler disabled (-NoSampler).' -ForegroundColor Yellow
+    $sampler = $null
+}
+else {
+    $sampler = Start-ResourceSampler $resourceFile
+}
 
 k6 run `
     -e "SCENARIO=$Scenario" `
@@ -227,13 +243,14 @@ k6 run `
     -e "RAMP=$Ramp" `
     -e "HOLD=$Hold" `
     -e "P95_BUDGET=$P95Budget" `
+    -e "STEADY_AFTER=10s" `
     -e "MAX_VUS=$MaxVus" `
     -o "json=$jsonOut" `
     load-tests/capacity/capacity.js
 
 $k6Exit = $LASTEXITCODE
 # Stop sampling before the cooldown, otherwise idle time is averaged in.
-$resources = Stop-ResourceSampler $sampler $resourceFile
+$resources = if ($sampler) { Stop-ResourceSampler $sampler $resourceFile } else { $null }
 # k6 exits 99 when a threshold is crossed. A saturated step is expected to
 # cross the latency budget, and that artifact is still a valid result.
 # Any other non-zero exit means the run itself failed and must not be
@@ -299,6 +316,11 @@ $meta = [ordered]@{
     hold                  = $Hold
     ramp                  = $Ramp
     p95_budget_ms         = $P95Budget
+    # Whole-window p95 includes the cold-start transient. steady_p95_ms is the
+    # number the SLO is about; both are recorded so the difference is visible.
+    steady_after_s        = $summary.steady_after_s
+    steady_p95_ms         = $summary.steady_p95_ms
+    cold_p95_ms           = $summary.cold_p95_ms
     k6_exit_code          = $k6Exit
     gateway_cpus          = $GatewayCpus
     cooldown_s            = $Cooldown
