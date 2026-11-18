@@ -85,8 +85,9 @@ Write-Host ("Admission: algorithm=$RateLimitAlgorithm sample_rate=$AuditSampleRa
 $env:GATEWAY_CPUS = "$GatewayCpus"
 # Compose recreates the gateway when these change, which also resets the
 # Prometheus counters - the meta records the profile so a counter reset is
-# explainable after the fact.
-$env:SPRING_PROFILES_ACTIVE = $Profiles
+# explainable after the fact. CAPACITY_PROFILES, not SPRING_PROFILES_ACTIVE:
+# .env owns the latter for real deployments.
+$env:CAPACITY_PROFILES = $Profiles
 $env:VIRTUAL_THREADS = if ($VirtualThreads) { 'true' } else { 'false' }
 Write-Host ("Logging: profiles=$Profiles virtual_threads=$($env:VIRTUAL_THREADS)") -ForegroundColor Cyan
 

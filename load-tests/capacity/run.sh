@@ -28,8 +28,9 @@ ABUSE_LIMIT_PER_IP="${RATE_ABUSE_LIMIT_PER_IP:-}"
 TENANT="${CAPACITY_TENANT:-default}"
 # dev supplies the fixture switch (auth off); capacity removes console log I/O,
 # mirroring the prod logging shape. PROFILES=dev reproduces the pre-Phase-5
-# logging cost.
-PROFILES="${SPRING_PROFILES_ACTIVE:-dev,capacity}"
+# logging cost. CAPACITY_PROFILES, not SPRING_PROFILES_ACTIVE: .env owns the
+# latter for real deployments.
+PROFILES="${CAPACITY_PROFILES:-dev,capacity}"
 VIRTUAL_THREADS="${VIRTUAL_THREADS:-false}"
 
 [[ "$AUDIT_SAMPLE_RATE" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] \

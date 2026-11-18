@@ -45,9 +45,10 @@ services:
       TOMCAT_MAX_THREADS: ${TOMCAT_MAX_THREADS:-200}
       LOG_LEVEL_GATEWAY: ${LOG_LEVEL_GATEWAY:-INFO}
       # dev supplies the fixture switch (auth off); capacity removes console log
-      # I/O so the run is not partly a terminal benchmark. Set to "dev" to
-      # reproduce the pre-Phase-5 logging cost.
-      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev,capacity}
+      # I/O so the run is not partly a terminal benchmark. CAPACITY_PROFILES is
+      # deliberately separate from SPRING_PROFILES_ACTIVE: .env sets that to
+      # "dev" for the real deployment, and the fixture must not fight it.
+      SPRING_PROFILES_ACTIVE: ${CAPACITY_PROFILES:-dev,capacity}
       VIRTUAL_THREADS: ${VIRTUAL_THREADS:-false}
     depends_on:
       sink:
