@@ -71,12 +71,19 @@
     </appender>
 
     <!--
-      Production logs are collected from stdout by the platform or read from
-      the mounted volume. Keeping CONSOLE in prod duplicates every line through
-      a TTY, which is measurable under load, so it is dropped there and kept
-      for local and dev runs.
+      Two profiles drop the CONSOLE appender:
+
+        prod      production reads logs from the mounted volume or the
+                  platform's collector; duplicating every line through a TTY
+                  is measurable under load.
+        capacity  the load-test fixture. It keeps the dev profile's behaviour
+                  switch (auth off, seeded data) but must not pay for console
+                  I/O, otherwise the measurement is partly a terminal benchmark.
+                  This mirrors prod's logging shape on purpose.
+
+      Everything else (local, dev, test) keeps the console.
     -->
-    <springProfile name="prod">
+    <springProfile name="prod | capacity">
         <logger name="AUDIT" level="INFO" additivity="false">
             <appender-ref ref="ASYNC_AUDIT_FILE"/>
         </logger>
@@ -86,7 +93,7 @@
         </root>
     </springProfile>
 
-    <springProfile name="!prod">
+    <springProfile name="!prod &amp; !capacity">
         <logger name="AUDIT" level="INFO" additivity="false">
             <appender-ref ref="ASYNC_CONSOLE"/>
             <appender-ref ref="ASYNC_AUDIT_FILE"/>

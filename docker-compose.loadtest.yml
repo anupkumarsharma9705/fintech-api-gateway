@@ -44,6 +44,11 @@ services:
       AUDIT_SAMPLE_RATE: ${AUDIT_SAMPLE_RATE:-1.0}
       TOMCAT_MAX_THREADS: ${TOMCAT_MAX_THREADS:-200}
       LOG_LEVEL_GATEWAY: ${LOG_LEVEL_GATEWAY:-INFO}
+      # dev supplies the fixture switch (auth off); capacity removes console log
+      # I/O so the run is not partly a terminal benchmark. Set to "dev" to
+      # reproduce the pre-Phase-5 logging cost.
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev,capacity}
+      VIRTUAL_THREADS: ${VIRTUAL_THREADS:-false}
     depends_on:
       sink:
         condition: service_healthy
