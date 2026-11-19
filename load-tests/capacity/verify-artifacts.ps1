@@ -101,6 +101,9 @@ $rows = foreach ($metaFile in $metas) {
         GitSha        = $meta.git_sha
         ContainerId   = $meta.container_id
         Dirty         = [bool]$meta.git_dirty
+        Restarted     = [bool]$meta.gateway_restarted
+        RestartsBefore = if ($null -ne $meta.gateway_restart_count_before) { [int]$meta.gateway_restart_count_before } else { 0 }
+        RestartsAfter  = if ($null -ne $meta.gateway_restart_count_after) { [int]$meta.gateway_restart_count_after } else { 0 }
         Requests      = [int]$summary.requests
         Rps           = [double]$summary.achieved_rps
         ExecutedRatio = if ($null -ne $summary.executed_ratio) { [double]$summary.executed_ratio } else { $null }
@@ -178,6 +181,7 @@ foreach ($row in $rows) {
 
     $reasons = @()
     if ($row.Dirty) { $reasons += 'git_dirty' }
+    if ($row.Restarted) { $reasons += 'gateway_restarted' }
     if ($row.Exit -ne 0 -and $row.Exit -ne 99) { $reasons += "k6_exit=$($row.Exit)" }
     if ($row.Unexpected -gt 0) { $reasons += "unexpected_status=$($row.Unexpected)" }
     if ($row.ServerErr -gt 0.001) { $reasons += "5xx=$($row.ServerErr)" }

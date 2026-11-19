@@ -233,6 +233,14 @@ $jsonOut = "load-tests/results/capacity-$tag.json"
 Write-Host "Running $Scenario at ${Rate} req/s for $Hold ..." -ForegroundColor Cyan
 
 $resourceFile = Join-Path ([IO.Path]::GetTempPath()) "capacity-resources-$tag.txt"
+# A restart during the measured window invalidates the run: the Prometheus
+# counters reset, in-flight requests fail, and the summary still looks like a
+# result. Capture identity and restart count before the load starts.
+$containerBefore = (docker inspect -f '{{.Id}}|{{.RestartCount}}' fintech-gateway-gateway-1).Trim()
+$beforeParts = $containerBefore -split '\|'
+$containerIdBefore = $beforeParts[0]
+$restartsBefore = [int]$beforeParts[1]
+
 if ($NoSampler) {
     Write-Host 'Resource sampler disabled (-NoSampler).' -ForegroundColor Yellow
     $sampler = $null
@@ -302,6 +310,18 @@ if ($Cooldown -gt 0) {
 Move-Item -Force $summaryPath $summaryTagged
 
 # ---- evidence snapshot ------------------------------------------------------
+$containerAfter = (docker inspect -f '{{.Id}}|{{.RestartCount}}' fintech-gateway-gateway-1).Trim()
+$afterParts = $containerAfter -split '\|'
+$containerIdAfter = $afterParts[0]
+$restartsAfter = [int]$afterParts[1]
+$gatewayRestarted = ($containerIdAfter -ne $containerIdBefore) -or ($restartsAfter -gt $restartsBefore)
+if ($gatewayRestarted) {
+    Write-Warning ("gateway restarted or was recreated during the run (id {0} -> {1}, restarts {2} -> {3}); this run is not publishable as a stable measurement" -f `
+        $containerIdBefore.Substring(0, [Math]::Min(12, $containerIdBefore.Length)),
+        $containerIdAfter.Substring(0, [Math]::Min(12, $containerIdAfter.Length)),
+        $restartsBefore, $restartsAfter)
+}
+
 $dockerStats = docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}'
 $metricsSnap = ''
 try {
@@ -344,6 +364,11 @@ $meta = [ordered]@{
     # commit's. Keying the delta chain on the container ID keeps a harness-only
     # commit from looking like a counter reset.
     container_id          = (docker inspect -f '{{.Id}}' fintech-gateway-gateway-1 2>$null)
+    container_id_before   = $containerIdBefore
+    container_id_after    = $containerIdAfter
+    gateway_restart_count_before = $restartsBefore
+    gateway_restart_count_after  = $restartsAfter
+    gateway_restarted     = $gatewayRestarted
     virtual_threads       = $env:VIRTUAL_THREADS
     max_vus               = $MaxVus
     window                = $summary.window
