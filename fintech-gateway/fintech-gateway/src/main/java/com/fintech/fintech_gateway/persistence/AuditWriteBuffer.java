@@ -204,20 +204,9 @@ public class AuditWriteBuffer {
     private void runWriter() {
         while (running || hasPending()) {
             try {
-                if (!flushOnce()) {
-                    if (!running) {
-                        break;
-                    }
-                    Thread.sleep(flushIntervalMillis);
+                if (!flushOnce(true) && !running) {
+                    break;
                 }
-            } catch (InterruptedException e) {
-                if (!running) {
-                    // Shutdown interrupt: keep draining until the queues are empty.
-                    Thread.interrupted();
-                    continue;
-                }
-                Thread.currentThread().interrupt();
-                break;
             } catch (RuntimeException e) {
                 log.error("Audit writer failed unexpectedly; continuing", e);
                 sleepQuietly();
@@ -232,22 +221,76 @@ public class AuditWriteBuffer {
     }
 
     /**
-     * Drains at most one batch and writes it. Package-visible so the batching
-     * and retry behaviour can be tested deterministically without a thread.
+     * Drains at most one batch and writes it without waiting. Package-visible
+     * so the batching and retry behaviour can be tested deterministically
+     * without a thread.
      *
      * @return true when at least one row was drained
      */
     synchronized boolean flushOnce() {
-        List<AuditLogRecord> batch = new ArrayList<>(batchSize);
-        criticalQueue.drainTo(batch, batchSize);
-        int criticalCount = batch.size();
-        if (batch.size() < batchSize) {
-            sampledQueue.drainTo(batch, batchSize - batch.size());
+        return flushOnce(false);
+    }
+
+    /**
+     * Drains at most one batch and writes it.
+     *
+     * <p>With {@code coalesce} set the writer keeps collecting for at most
+     * {@code gateway.audit.write-flush-interval}, so the documented
+     * "batch size or flush interval" contract holds under load. Without it the
+     * call writes whatever is queued right now, which is what shutdown and the
+     * tests need.</p>
+     *
+     * <p>Draining immediately in the writer loop produced one small
+     * transaction every few requests: at 500 req/s with every event persisted
+     * that was roughly 100 commits per second and it pinned both vCPUs.</p>
+     *
+     * @return true when at least one row was drained
+     */
+    synchronized boolean flushOnce(boolean coalesce) {
+        List<AuditLogRecord> critical = new ArrayList<>(batchSize);
+        List<AuditLogRecord> sampled = new ArrayList<>();
+        long deadline = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(flushIntervalMillis);
+
+        while (critical.size() + sampled.size() < batchSize) {
+            int total = critical.size() + sampled.size();
+            criticalQueue.drainTo(critical, batchSize - total);
+            total = critical.size() + sampled.size();
+            if (total < batchSize) {
+                sampledQueue.drainTo(sampled, batchSize - total);
+                total = critical.size() + sampled.size();
+            }
+            if (total >= batchSize || !coalesce) {
+                break;
+            }
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                break;
+            }
+            try {
+                // Short slices keep enqueue latency bounded while still
+                // collapsing a burst into one batch.
+                Thread.sleep(Math.max(1L, Math.min(5L,
+                        TimeUnit.NANOSECONDS.toMillis(remainingNanos))));
+            } catch (InterruptedException e) {
+                if (running) {
+                    Thread.currentThread().interrupt();
+                }
+                // On shutdown the interrupt only ends the coalescing window;
+                // the partial batch is written and the remaining rows drain
+                // without waiting.
+                break;
+            }
         }
-        int sampledCount = batch.size() - criticalCount;
-        if (batch.isEmpty()) {
+
+        int criticalCount = critical.size();
+        int sampledCount = sampled.size();
+        if (criticalCount == 0 && sampledCount == 0) {
             return false;
         }
+        List<AuditLogRecord> batch = new ArrayList<>(criticalCount + sampledCount);
+        batch.addAll(critical);
+        batch.addAll(sampled);
 
         if (write(batch)) {
             if (criticalCount > 0) {

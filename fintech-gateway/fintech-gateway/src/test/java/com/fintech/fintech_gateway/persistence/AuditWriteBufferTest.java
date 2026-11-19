@@ -185,6 +185,36 @@ class AuditWriteBufferTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void coalescingCollectsRowsForTheFlushWindowInsteadOfWritingPerRow() throws Exception {
+        properties.getAudit().setCriticalQueueCapacity(100);
+        properties.getAudit().setSampledQueueCapacity(100);
+        properties.getAudit().setWriteFlushInterval(java.time.Duration.ofMillis(300));
+        registry = new SimpleMeterRegistry();
+        buffer = new AuditWriteBuffer(jdbcTemplate, properties, registry);
+
+        java.util.concurrent.atomic.AtomicBoolean wrote =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        Thread flusher = new Thread(() -> wrote.set(buffer.flushOnce(true)));
+        flusher.start();
+        for (int i = 0; i < 20; i++) {
+            buffer.enqueue(record("coalesced-" + i, "GET", 200), true);
+            Thread.sleep(3);
+        }
+        flusher.join(2_000);
+
+        assertFalse(flusher.isAlive(), "coalescing must end at the flush interval");
+        assertTrue(wrote.get());
+        ArgumentCaptor<BatchPreparedStatementSetter> captor =
+                ArgumentCaptor.forClass(BatchPreparedStatementSetter.class);
+        verify(jdbcTemplate, times(1))
+                .batchUpdate(eq(AuditWriteBuffer.INSERT_SQL), captor.capture());
+        assertEquals(20, captor.getValue().getBatchSize());
+        assertEquals(20.0, registry.counter("gateway.audit.persisted",
+                "dataset", "critical").count());
+    }
+
+    @Test
     void invalidConfigurationIsRejectedAtConstruction() {
         GatewayProperties invalid = TestProperties.defaults();
         invalid.getAudit().setCriticalQueueCapacity(0);
