@@ -1,0 +1,15 @@
+{
+  "tag": "20261119-223412",
+  "phase": "gateway-fault",
+  "rate": 50,
+  "duration": "5s",
+  "requests": 250,
+  "ok": 0,
+  "unavailable": 0,
+  "server_error": 0,
+  "blocked": 0,
+  "unreachable": 250,
+  "other": 0,
+  "latency_p95_ms": 3.213099999999998,
+  "latency_max_ms": 7.3685
+}

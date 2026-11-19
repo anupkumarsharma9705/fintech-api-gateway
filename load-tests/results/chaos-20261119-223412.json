@@ -1,0 +1,307 @@
+﻿{
+    "tag":  "20261119-223412",
+    "started_at":  "20261119-223412",
+    "scenario":  "all",
+    "target_rate":  50,
+    "fault_seconds":  10,
+    "gateway_fault_seconds":  5,
+    "recovery_seconds":  15,
+    "audit_sample_rate":  1,
+    "gateway_cpus":  2,
+    "gateway_fault_mode":  "sigkill-jvm",
+    "git_sha":  "0c620f97122e3a05c958f1045eb019d637bb1c8e",
+    "git_dirty":  false,
+    "host_os":  "Microsoft Windows 10.0.26300 ",
+    "host_cpus":  12,
+    "container_id":  "f3ce26dc51f7d92bd1ea349856f79afc7b6d25b10ae0f77b771a0bd999e6af40",
+    "completed":  true,
+    "error":  null,
+    "phases":  [
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "redis-baseline",
+                       "rate":  50,
+                       "duration":  "15s",
+                       "requests":  750,
+                       "ok":  750,
+                       "unavailable":  0,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  0,
+                       "other":  0,
+                       "latency_p95_ms":  10.483469999999999,
+                       "latency_max_ms":  26.6817
+                   },
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "redis-fault",
+                       "rate":  50,
+                       "duration":  "10s",
+                       "requests":  451,
+                       "ok":  0,
+                       "unavailable":  451,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  0,
+                       "other":  0,
+                       "latency_p95_ms":  2009.1871,
+                       "latency_max_ms":  2044.7448
+                   },
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "redis-recovered",
+                       "rate":  50,
+                       "duration":  "15s",
+                       "requests":  750,
+                       "ok":  750,
+                       "unavailable":  0,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  0,
+                       "other":  0,
+                       "latency_p95_ms":  9.854829999999996,
+                       "latency_max_ms":  20.6317
+                   },
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "mysql-baseline",
+                       "rate":  50,
+                       "duration":  "15s",
+                       "requests":  751,
+                       "ok":  751,
+                       "unavailable":  0,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  0,
+                       "other":  0,
+                       "latency_p95_ms":  9.5166,
+                       "latency_max_ms":  17.287
+                   },
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "mysql-fault",
+                       "rate":  50,
+                       "duration":  "10s",
+                       "requests":  501,
+                       "ok":  501,
+                       "unavailable":  0,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  0,
+                       "other":  0,
+                       "latency_p95_ms":  9.5713,
+                       "latency_max_ms":  19.9654
+                   },
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "mysql-recovered",
+                       "rate":  50,
+                       "duration":  "15s",
+                       "requests":  750,
+                       "ok":  750,
+                       "unavailable":  0,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  0,
+                       "other":  0,
+                       "latency_p95_ms":  9.231349999999999,
+                       "latency_max_ms":  29.6054
+                   },
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "gateway-baseline",
+                       "rate":  50,
+                       "duration":  "15s",
+                       "requests":  750,
+                       "ok":  750,
+                       "unavailable":  0,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  0,
+                       "other":  0,
+                       "latency_p95_ms":  8.698504999999997,
+                       "latency_max_ms":  16.4811
+                   },
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "gateway-fault",
+                       "rate":  50,
+                       "duration":  "5s",
+                       "requests":  250,
+                       "ok":  0,
+                       "unavailable":  0,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  250,
+                       "other":  0,
+                       "latency_p95_ms":  3.213099999999998,
+                       "latency_max_ms":  7.3685
+                   },
+                   {
+                       "tag":  "20261119-223412",
+                       "phase":  "gateway-recovered",
+                       "rate":  50,
+                       "duration":  "15s",
+                       "requests":  750,
+                       "ok":  750,
+                       "unavailable":  0,
+                       "server_error":  0,
+                       "blocked":  0,
+                       "unreachable":  0,
+                       "other":  0,
+                       "latency_p95_ms":  168.64148999999995,
+                       "latency_max_ms":  383.2447
+                   }
+               ],
+    "snapshots":  [
+                      {
+                          "label":  "redis-before",
+                          "timestamp":  "2026-11-19T22:34:15.9387341+05:30",
+                          "readiness":  200,
+                          "metrics":  {
+                                          "persisted":  747,
+                                          "droppedWrite":  0,
+                                          "droppedQueue":  0,
+                                          "queueDepth":  0
+                                      }
+                      },
+                      {
+                          "label":  "redis-fault",
+                          "timestamp":  "2026-11-19T22:34:44.3848468+05:30",
+                          "readiness":  503,
+                          "metrics":  {
+                                          "persisted":  1948,
+                                          "droppedWrite":  0,
+                                          "droppedQueue":  0,
+                                          "queueDepth":  0
+                                      }
+                      },
+                      {
+                          "label":  "redis-after",
+                          "timestamp":  "2026-11-19T22:34:46.7039218+05:30",
+                          "readiness":  200,
+                          "metrics":  {
+                                          "persisted":  1948,
+                                          "droppedWrite":  0,
+                                          "droppedQueue":  0,
+                                          "queueDepth":  0
+                                      }
+                      },
+                      {
+                          "label":  "mysql-before",
+                          "timestamp":  "2026-11-19T22:35:02.4184642+05:30",
+                          "readiness":  200,
+                          "metrics":  {
+                                          "persisted":  2698,
+                                          "droppedWrite":  0,
+                                          "droppedQueue":  0,
+                                          "queueDepth":  0
+                                      }
+                      },
+                      {
+                          "label":  "mysql-fault",
+                          "timestamp":  "2026-11-19T22:35:32.5366017+05:30",
+                          "readiness":  503,
+                          "metrics":  {
+                                          "persisted":  3449,
+                                          "droppedWrite":  320,
+                                          "droppedQueue":  0,
+                                          "queueDepth":  0
+                                      }
+                      },
+                      {
+                          "label":  "mysql-after",
+                          "timestamp":  "2026-11-19T22:36:05.5626479+05:30",
+                          "readiness":  200,
+                          "metrics":  {
+                                          "persisted":  4380,
+                                          "droppedWrite":  320,
+                                          "droppedQueue":  0,
+                                          "queueDepth":  0
+                                      }
+                      }
+                  ],
+    "checks":  [
+                   {
+                       "name":  "redis baseline is healthy",
+                       "pass":  true,
+                       "detail":  "ok=750 unavailable=0 blocked=0"
+                   },
+                   {
+                       "name":  "admission fails closed, not open",
+                       "pass":  true,
+                       "detail":  "ok=0 unavailable=451 server_error=0 blocked=0"
+                   },
+                   {
+                       "name":  "readiness reports the dependency outage",
+                       "pass":  true,
+                       "detail":  "readiness HTTP 503"
+                   },
+                   {
+                       "name":  "readiness recovers",
+                       "pass":  true,
+                       "detail":  "readiness HTTP 200"
+                   },
+                   {
+                       "name":  "traffic recovers after Redis returns",
+                       "pass":  true,
+                       "detail":  "ok=750 unavailable=0 blocked=0"
+                   },
+                   {
+                       "name":  "mysql baseline is healthy",
+                       "pass":  true,
+                       "detail":  "ok=751 unavailable=0 blocked=0"
+                   },
+                   {
+                       "name":  "request path does not depend on MySQL",
+                       "pass":  true,
+                       "detail":  "ok=501 unavailable=0 server_error=0 blocked=0"
+                   },
+                   {
+                       "name":  "readiness reports the database outage",
+                       "pass":  true,
+                       "detail":  "readiness HTTP 503"
+                   },
+                   {
+                       "name":  "readiness recovers",
+                       "pass":  true,
+                       "detail":  "readiness HTTP 200"
+                   },
+                   {
+                       "name":  "traffic continues after MySQL returns",
+                       "pass":  true,
+                       "detail":  "ok=750 unavailable=0 blocked=0"
+                   },
+                   {
+                       "name":  "audit ledger closes across the outage",
+                       "pass":  true,
+                       "detail":  "served=2002 accounted=2002 (persisted 1682, write_failure 320, queued 0)"
+                   },
+                   {
+                       "name":  "audit queue drains after recovery",
+                       "pass":  true,
+                       "detail":  "queue=0"
+                   },
+                   {
+                       "name":  "gateway baseline is healthy",
+                       "pass":  true,
+                       "detail":  "ok=750 unreachable=0 blocked=0"
+                   },
+                   {
+                       "name":  "kill produces connection failures, not fabricated success",
+                       "pass":  true,
+                       "detail":  "mode=sigkill-jvm ok=0 unreachable=250"
+                   },
+                   {
+                       "name":  "restart policy restores service",
+                       "pass":  true,
+                       "detail":  "readiness=True ok=750 unreachable=0"
+                   },
+                   {
+                       "name":  "container was actually restarted",
+                       "pass":  true,
+                       "detail":  "restarts before=3 after=4"
+                   }
+               ],
+    "verdict":  "PASS"
+}

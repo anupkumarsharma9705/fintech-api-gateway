@@ -1,0 +1,15 @@
+{
+  "tag": "20261119-223412",
+  "phase": "redis-fault",
+  "rate": 50,
+  "duration": "10s",
+  "requests": 451,
+  "ok": 0,
+  "unavailable": 451,
+  "server_error": 0,
+  "blocked": 0,
+  "unreachable": 0,
+  "other": 0,
+  "latency_p95_ms": 2009.1871,
+  "latency_max_ms": 2044.7448
+}

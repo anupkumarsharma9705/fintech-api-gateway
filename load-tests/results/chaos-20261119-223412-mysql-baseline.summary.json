@@ -1,0 +1,15 @@
+{
+  "tag": "20261119-223412",
+  "phase": "mysql-baseline",
+  "rate": 50,
+  "duration": "15s",
+  "requests": 751,
+  "ok": 751,
+  "unavailable": 0,
+  "server_error": 0,
+  "blocked": 0,
+  "unreachable": 0,
+  "other": 0,
+  "latency_p95_ms": 9.5166,
+  "latency_max_ms": 17.287
+}
