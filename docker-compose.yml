@@ -99,6 +99,10 @@ services:
       dockerfile: fintech-gateway/fintech-gateway/Dockerfile
     image: fintech-gateway:local
     restart: unless-stopped
+    # Run a minimal init as PID 1. The JVM handles SIGTERM itself, but an init
+    # also reaps zombies and lets a chaos test SIGKILL the JVM without killing
+    # PID 1 (the kernel ignores unhandled signals sent to a namespace's init).
+    init: true
     <<: *app-hardening
     environment:
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
