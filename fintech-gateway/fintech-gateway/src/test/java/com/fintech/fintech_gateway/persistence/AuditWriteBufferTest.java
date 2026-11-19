@@ -189,17 +189,32 @@ class AuditWriteBufferTest {
     void coalescingCollectsRowsForTheFlushWindowInsteadOfWritingPerRow() throws Exception {
         properties.getAudit().setCriticalQueueCapacity(100);
         properties.getAudit().setSampledQueueCapacity(100);
-        properties.getAudit().setWriteFlushInterval(java.time.Duration.ofMillis(300));
+        properties.getAudit().setWriteFlushInterval(java.time.Duration.ofMillis(500));
         registry = new SimpleMeterRegistry();
         buffer = new AuditWriteBuffer(jdbcTemplate, properties, registry);
 
         java.util.concurrent.atomic.AtomicBoolean wrote =
                 new java.util.concurrent.atomic.AtomicBoolean();
-        Thread flusher = new Thread(() -> wrote.set(buffer.flushOnce(true)));
+        java.util.concurrent.CountDownLatch started =
+                new java.util.concurrent.CountDownLatch(1);
+        Thread flusher = new Thread(() -> {
+            started.countDown();
+            wrote.set(buffer.flushOnce(true));
+        });
         flusher.start();
-        for (int i = 0; i < 20; i++) {
+        assertTrue(started.await(1, java.util.concurrent.TimeUnit.SECONDS),
+                "flusher must start");
+
+        // Let the flusher open the window on an empty queue, then deliver two
+        // groups well inside it. The old writer wrote the first group
+        // immediately; coalescing must wait and write one batch.
+        Thread.sleep(50);
+        for (int i = 0; i < 10; i++) {
             buffer.enqueue(record("coalesced-" + i, "GET", 200), true);
-            Thread.sleep(3);
+        }
+        Thread.sleep(50);
+        for (int i = 10; i < 20; i++) {
+            buffer.enqueue(record("coalesced-" + i, "GET", 200), true);
         }
         flusher.join(2_000);
 
