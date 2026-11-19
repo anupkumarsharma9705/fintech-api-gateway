@@ -1,0 +1,23 @@
+{
+  "scenario": "health",
+  "target_rate": 1000,
+  "held_for": "60s",
+  "ramp": "0s",
+  "window": "constant",
+  "max_vus": 2000,
+  "scheduled_iterations": 60000,
+  "requests": 60001,
+  "achieved_rps": 999.9615687842266,
+  "iterations": 60001,
+  "executed_ratio": 1.0000166666666668,
+  "dropped_iterations": 0,
+  "generator_limited": false,
+  "vus_max_observed": 200,
+  "failed_requests": 0,
+  "server_error_rate": 0,
+  "unexpected_status_rate": 0,
+  "p50_ms": 1.0838,
+  "p95_ms": 4.1975,
+  "p99_ms": 13.532,
+  "max_ms": 93.7772
+}

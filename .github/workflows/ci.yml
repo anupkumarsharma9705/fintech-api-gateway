@@ -31,6 +31,24 @@ jobs:
       - name: Verify
         run: mvn -B -ntp clean verify
 
+      # Invoked directly at the reactor root. Binding this goal in a profile
+      # also executes it inside every module, which writes module-local BOMs
+      # but never the aggregate target/bom.json.
+      - name: Generate aggregate CycloneDX SBOM
+        run: >
+          mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.8.1:makeAggregateBom
+          -DoutputFormat=json -DoutputName=bom -DprojectType=application
+          -DschemaVersion=1.5 -DincludeTestScope=false
+
+      - name: Upload CycloneDX SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyclonedx-sbom
+          path: target/bom.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload JaCoCo reports
         if: always()
         uses: actions/upload-artifact@v4

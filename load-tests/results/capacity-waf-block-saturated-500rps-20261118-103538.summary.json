@@ -1,0 +1,14 @@
+{
+  "scenario": "waf-block",
+  "target_rate": 500,
+  "held_for": "60s",
+  "requests": 36874,
+  "achieved_rps": 433.76673002334377,
+  "failed_requests": 36874,
+  "server_error_rate": 0,
+  "unexpected_status_rate": 0,
+  "p50_ms": 3.3327999999999998,
+  "p95_ms": 9.596054999999998,
+  "p99_ms": 44.4448489999993,
+  "max_ms": 161.7046
+}

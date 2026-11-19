@@ -432,27 +432,41 @@ capacity claim.
 - Operator authentication with constant-time comparison and Redis lockout.
 - Health/readiness separation, graceful shutdown, bounded audit buffer.
 - Non-root, read-only container images; loopback-only published ports.
+- Kubernetes base plus dev/prod overlays: PDB, HPA, default-deny
+  NetworkPolicy, startup/readiness/liveness probes, restricted pod security.
+- Redis Cluster profile with a slot-safe tenant hash tag and topology refresh.
+- Executable chaos harness for Redis, MySQL and process failure.
+- CycloneDX SBOM, Trivy scanning, cosign keyless signing and SLSA provenance in
+  the release workflow.
+- PCI DSS / RBI / NPCI control matrix that separates implemented controls from
+  operator and assessor obligations.
 - CI for build, tests, Compose validation and a live stack smoke test.
 
 ### Not done — do not claim GA without these
 
 1. **Full integration suite.** MySQL/Flyway upgrade and restore path, upstream
    error/timeout matrix, concurrent idempotency race, live IdP/JWKS rotation and
-   soak tests under Testcontainers. The limiter Lua has an opt-in real-Redis
-   contract test; the rest still relies on the Compose smoke test.
-2. **High availability.** Kubernetes/Helm manifests, PodDisruptionBudgets,
-   Redis Sentinel/Cluster, MySQL replication, tested restore procedure.
-3. **Secrets management.** Vault/cloud secret manager integration and key
+   Testcontainers soak tests. The limiter Lua has an opt-in real-Redis contract
+   test; the rest still relies on the Compose smoke test.
+2. **Live Kubernetes/Redis Cluster validation.** The manifests render and the
+   key layout is unit-tested, but no cluster was available here. Multi-replica
+   linearity and Redis failover are unmeasured.
+3. **Linux capacity repeat.** The verified 500 req/s point is Docker Desktop on
+   Windows; it is not portable. No Linux VM was provisioned.
+4. **Secrets management.** Vault/cloud secret manager integration and key
    rotation without restart; no secrets in `.env` on shared hosts.
-4. **Operational controls.** Admin UI/RBAC for trust resets, per-client and
+5. **Operational controls.** Admin UI/RBAC for trust resets, per-client and
    per-tenant policy management, billing/metering, usage quotas.
-5. **Compliance productization.** A documented PCI-DSS/RBI/NPCI control matrix,
-   evidence retention and sign-off workflow, scheduled report generation.
-6. **Security validation.** External penetration test, dependency/container
-   scanning in CI, WAF false-positive tuning against real traffic.
-7. **Support and SLA.** Support tiers, incident response commitments, and
-   commercial terms. The source is proprietary (see [LICENSE](LICENSE)); public
-   visibility does not grant usage rights.
+6. **Audit immutability and retention.** Rows are mutable by a database
+   administrator and no retention/legal-hold job exists. Ship to WORM storage or
+   an append-only SIEM before treating the export as audit-of-record.
+7. **Compliance sign-off.** The control matrix exists; a named compliance owner
+   must still accept the sampling policy in ADR-001.
+8. **Security validation.** Scanning and signing are wired; an external
+   penetration test has not been performed.
+9. **Support and SLA.** [SUPPORT.md](SUPPORT.md) documents scope and commercial
+   options; no SLA exists without a signed agreement. The source is proprietary
+   (see [LICENSE](LICENSE)); public visibility does not grant usage rights.
 
 The honest commercial position: this is a strong technical foundation for a
 design-partner pilot, not a product that can be sold as a drop-in replacement
@@ -467,11 +481,15 @@ evidence workflow with 3–5 design partners before expanding scope.
 fintech-gateway/fintech-gateway/   Spring Boot gateway (the product)
 fintech-backend/fintech-backend/   Reference account/payment backend
 fintech-frontend/fintech-frontend/ Static demo UI
-load-tests/                        k6 scripts
-docs/                              Operations and configuration reference
+deploy/k8s/                        Kubernetes base, dev and prod overlays
+load-tests/                        k6 capacity and chaos harnesses
+docs/                              Operations, configuration, K8s, chaos, compliance
 docker-compose.yml                 Gateway + backend + MySQL + Redis
 .github/workflows/ci.yml           Build, test, Compose validation, live stack smoke test
+.github/workflows/release.yml      Signed image, SBOM attestation, provenance
+.github/workflows/security.yml     Trivy SARIF scan
 BUSINESS_VALIDATION.md             Market, pricing and go/no-go analysis
+SUPPORT.md                         Support scope and commercial terms
 LICENSE                            Proprietary license; no usage rights without an agreement
 ```
 
@@ -480,6 +498,11 @@ LICENSE                            Proprietary license; no usage rights without 
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — every environment variable.
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — health semantics, failure matrix,
   auth incident procedures, compliance export, backup and capacity notes.
+- [docs/KUBERNETES.md](docs/KUBERNETES.md) — deployment, Redis Cluster
+  requirements, multi-replica invariants and rollback.
+- [docs/CHAOS.md](docs/CHAOS.md) — the executable failure contract.
+- [docs/COMPLIANCE-MATRIX.md](docs/COMPLIANCE-MATRIX.md) — PCI DSS / RBI / NPCI
+  mapping with explicit gaps.
 - [BUSINESS_VALIDATION.md](BUSINESS_VALIDATION.md) — why the verdict is
   VALIDATE FIRST.
 

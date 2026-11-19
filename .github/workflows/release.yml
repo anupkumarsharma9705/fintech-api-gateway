@@ -1,0 +1,121 @@
+name: Release
+
+# Triggered by an annotated or lightweight tag such as v1.0.0.
+#
+# Produces, from the exact tagged tree:
+#   - a tested jar set and a CycloneDX SBOM (target/bom.json)
+#   - a multi-arch image pushed to GHCR
+#   - a signed image (cosign keyless, GitHub OIDC) with SLSA build provenance
+#   - an SBOM attestation bound to the image digest
+#   - a GitHub Release with the SBOM attached
+#
+# No registry credentials are stored: GHCR uses GITHUB_TOKEN and signing uses
+# the workflow's OIDC identity. Verify with:
+#   cosign verify ghcr.io/<owner>/fintech-gateway:v1.0.0 \
+#     --certificate-identity-regexp '^https://github.com/<owner>/Fintech-Project/' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Verify
+        run: mvn -B -ntp clean verify
+
+      - name: Generate aggregate CycloneDX SBOM
+        run: >
+          mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.8.1:makeAggregateBom
+          -DoutputFormat=json -DoutputName=bom -DprojectType=application
+          -DschemaVersion=1.5 -DincludeTestScope=false
+
+      - name: Compute lowercase image name
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fintech-gateway" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: fintech-gateway/fintech-gateway/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max
+          sbom: true
+
+      # Scan the digest that was actually pushed, not a locally rebuilt image.
+      # Unfixed base-image CVEs are reported but do not block the release;
+      # fixable CRITICAL findings do. The step runs before signing so a failing
+      # scan leaves an unsigned image.
+      - name: Scan image for fixable critical CVEs
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL'
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image digest (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Attest SBOM to the image
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: target/bom.json
+          push-to-registry: true
+
+      - name: Publish release with SBOM
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/bom.json
+          generate_release_notes: true

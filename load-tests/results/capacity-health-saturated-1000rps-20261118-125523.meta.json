@@ -1,0 +1,52 @@
+﻿{
+    "tag":  "health-saturated-1000rps-20261118-125523",
+    "scenario":  "health",
+    "mode":  "saturated",
+    "target_rate":  1000,
+    "hold":  "60s",
+    "ramp":  "0s",
+    "p95_budget_ms":  50,
+    "k6_exit_code":  0,
+    "gateway_cpus":  2,
+    "cooldown_s":  60,
+    "rate_limit_algorithm":  "gcra",
+    "audit_sample_rate":  1,
+    "rate_abuse_limit_per_ip":  100000000,
+    "capacity_tenant":  "default",
+    "admission_reset":  true,
+    "gateway_profiles":  "dev,capacity",
+    "virtual_threads":  "false",
+    "max_vus":  0,
+    "window":  "constant",
+    "scheduled_iterations":  60000,
+    "executed_ratio":  1.0000166666666668,
+    "dropped_iterations":  0,
+    "generator_limited":  false,
+    "git_sha":  "0bf87cf86b6f248560a0a199f6ac88dc6a1766b1",
+    "git_dirty":  false,
+    "host_os":  "Microsoft Windows 10.0.26300 ",
+    "host_cpus":  12,
+    "docker_version":  "29.9.2",
+    "k6_version":  "k6.exe v2.4.0 (commit/dd9395906d, go1.26.11, windows/amd64)",
+    "started_at":  "20261118-125523",
+    "artifacts":  {
+                      "k6_json":  "load-tests/results/capacity-health-saturated-1000rps-20261118-125523.json",
+                      "summary":  "load-tests/results/capacity-health-saturated-1000rps-20261118-125523.summary.json",
+                      "metrics":  "load-tests/results/capacity-health-saturated-1000rps-20261118-125523.prometheus.txt"
+                  },
+    "resources":  {
+                      "samples":  9,
+                      "cpu_peak_pct":  129.78,
+                      "cpu_mean_pct":  47.2,
+                      "mem_peak_mib":  633.4
+                  },
+    "container_stats":  [
+                            "fintech-gateway-gateway-1|0.92%|629.9MiB / 1GiB",
+                            "fintech-gateway-redis-1|0.68%|9.285MiB / 7.622GiB",
+                            "fintech-gateway-sink-1|2.65%|47.34MiB / 7.622GiB",
+                            "fintech-gateway-mysql-1|1.59%|459.5MiB / 7.622GiB",
+                            "fintech-gateway-backend-1|1.06%|267.9MiB / 7.622GiB",
+                            "java-companion-orchestrator-server-1|0.46%|575.1MiB / 7.622GiB",
+                            "java-companion-postgres-1|0.00%|41.95MiB / 7.622GiB"
+                        ]
+}

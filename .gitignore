@@ -54,7 +54,6 @@ verify-output.txt
 # attachment instead of bloating the repository.
 load-tests/results/_warmup.json
 load-tests/results/capacity-*.json
-load-tests/results/capacity-*.prometheus.txt
 load-tests/results/capacity-*.container-stats.txt
 !load-tests/results/capacity-*.summary.json
 !load-tests/results/capacity-*.meta.json

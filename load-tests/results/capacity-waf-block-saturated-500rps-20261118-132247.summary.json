@@ -1,0 +1,23 @@
+{
+  "scenario": "waf-block",
+  "target_rate": 500,
+  "held_for": "60s",
+  "ramp": "0s",
+  "window": "constant",
+  "max_vus": 1000,
+  "scheduled_iterations": 30000,
+  "requests": 29963,
+  "achieved_rps": 499.3530908456414,
+  "iterations": 29963,
+  "executed_ratio": 0.9987666666666667,
+  "dropped_iterations": 38,
+  "generator_limited": true,
+  "vus_max_observed": 101,
+  "failed_requests": 29963,
+  "server_error_rate": 0,
+  "unexpected_status_rate": 0,
+  "p50_ms": 2.7542,
+  "p95_ms": 32.0278,
+  "p99_ms": 95.73353000000026,
+  "max_ms": 519.0133
+}

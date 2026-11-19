@@ -1,0 +1,53 @@
+# Non-secret runtime configuration.
+#
+# Values here are safe defaults for a production-shaped deployment. Anything
+# that authenticates, decrypts or authorises belongs in the Secret, not here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fintech-gateway
+  labels:
+    app.kubernetes.io/name: fintech-gateway
+data:
+  SPRING_PROFILES_ACTIVE: "prod,redis-cluster"
+  SERVER_PORT: "8081"
+  TOMCAT_MAX_THREADS: "200"
+  VIRTUAL_THREADS: "false"
+
+  # Data stores. The Secret carries the credentials; these are addresses.
+  MYSQL_HOST: "mysql.data.svc.cluster.local"
+  MYSQL_PORT: "3306"
+  MYSQL_DB: "FintechGateway"
+  MYSQL_SSL: "true"
+  MYSQL_ALLOW_PUBLIC_KEY_RETRIEVAL: "false"
+  DB_POOL_MAX: "20"
+  DB_POOL_MIN: "5"
+
+  REDIS_CLUSTER_NODES: "redis-cluster.data.svc.cluster.local:6379"
+
+  # Upstream. Replace with the real core-banking service.
+  BACKEND_URL: "http://backend.default.svc.cluster.local:8080"
+  BACKEND_CONNECT_TIMEOUT: "2s"
+  BACKEND_READ_TIMEOUT: "5s"
+  TRUST_PROXY: "true"
+
+  # Admission. Per-tenant limits, not per-IP; IP is the abuse dimension only.
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_ALGORITHM: "gcra"
+  RATE_LIMIT_WINDOW: "60s"
+  RATE_HIGH_TRUST: "1200"
+  RATE_MEDIUM_TRUST: "600"
+  RATE_LOW_TRUST: "120"
+  RATE_ABUSE_LIMIT_PER_IP: "300"
+
+  # Audit evidence. Clean ALLOW traffic is sampled; security, payment and
+  # idempotency events are never sampled. Compliance exports disclose the rate.
+  AUDIT_SAMPLE_RATE: "0.1"
+  AUDIT_CRITICAL_QUEUE_CAPACITY: "20000"
+  AUDIT_SAMPLED_QUEUE_CAPACITY: "10000"
+  AUDIT_WRITE_BATCH_SIZE: "500"
+  AUDIT_WRITE_FLUSH_INTERVAL: "100ms"
+
+  LOG_LEVEL_GATEWAY: "INFO"
+  CORS_ALLOWED_ORIGINS: "https://app.example.com"
+  HSTS_ENABLED: "true"

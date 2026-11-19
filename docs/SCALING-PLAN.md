@@ -1,26 +1,36 @@
 # Scaling Plan — From "Test Harness Numbers" to Real Capacity
 
-**Status:** In progress. Phases 0–2 are implemented and measured on
-Windows/Docker Desktop; the Linux publishing run and Phase 4 scale-out are open.
-**Date:** 2026-11-16 (status updated 2026-11-17)
+**Status:** Phases 0–5 implemented and measured on Windows/Docker Desktop. Phase 6
+(Kubernetes manifests, Redis Cluster profile, chaos harness, SBOM/signing,
+compliance matrix) is implemented; the one-hour soak and live-cluster validation
+are tracked below. The Linux publishing run remains blocked on a VM.
+**Date:** 2026-11-19
 **Scope:** Throughput and latency of `fintech-gateway/fintech-gateway`.
 
-## Current status (2026-11-17)
+## Current status (2026-11-19)
 
 | Item | State | Evidence |
 |---|---|---|
 | Measurement rig (open-loop k6, nginx sink, runners) | Done | `load-tests/capacity/` |
-| Single-round-trip admission | Done | `AdmissionGate`, commit `00d8804` |
-| Async logging and explicit container limits | Done | commit `00d8804` |
-| Audit write out of the request path | Done | `AuditWriteBuffer`, ADR-001 |
+| Single-round-trip admission | Done | `AdmissionGate` |
+| Async logging and explicit container limits | Done | `application.properties`, logback profiles |
+| Audit write out of the request path + coalescing writer | Done | `AuditWriteBuffer`, commit `b3b20e1` |
 | GCRA limiter + tenant/client keying | Done | `RateLimitScripts`, `RedisKeys` |
 | Real-Redis limiter contract test | Done (opt-in) | `RateLimitScriptsIntegrationTest` |
-| Windows capacity ladder after Phases 2–4 | Done | `load-tests/CAPACITY.md` |
-| Linux VM repeat of the ladder | **Blocked: no VM provisioned** | — |
-| Multi-replica, soak, chaos | **Not started** | — |
+| Windows ladder, 200–500 req/s | Done | `load-tests/CAPACITY.md` |
+| Full-audit read at 500 req/s | **Not verified on this host** — CPU-bound, generator-limited | new full-audit artifacts |
+| Ceiling above 500 req/s | **Unproven** — the 12 vCPU host exhausts generator VUs first | `CAPACITY.md` |
+| Kubernetes base + overlays | Render-validated, not cluster-tested | `deploy/k8s/`, `docs/KUBERNETES.md` |
+| Redis Cluster profile | Implemented and key-layout tested; not live-tested | `application-redis-cluster.properties`, `RedisKeysTest` |
+| Chaos harness (Redis, MySQL, gateway kill) | Implemented; evidence in `load-tests/results/chaos-*` | `load-tests/chaos/`, `docs/CHAOS.md` |
+| One-hour soak at 80 % of the verified rate | Running / recorded in `CAPACITY.md` | capacity artifact |
+| SBOM, image signing, provenance | Workflows implemented; first execution is the first `v*` tag | `.github/workflows/release.yml`, `security.yml` |
+| Compliance control matrix and support terms | Done | `docs/COMPLIANCE-MATRIX.md`, `SUPPORT.md` |
+| Linux VM repeat | **Blocked: no VM provisioned** | — |
 
 The Windows numbers are useful for regression detection and are disclosed as
-non-portable. They are not the published capacity claim.
+non-portable. They are not a production capacity claim.
+
 
 ---
 
@@ -244,65 +254,35 @@ is a claim hiring managers actually test.
 
 ---
 
-## 4. Execution phases
+## 4. Executed phases (0–6)
 
-### Phase 0 — Build the measurement rig (blocking, ~1 day)
+The original estimate-driven ladder was replaced by measurement after Phase 0.
+What actually happened, in order:
 
-1. `load-tests/upstream-sink/` — a minimal Go (or `nginx`) service returning a fixed
-   JSON body in <1 ms. Replaces the Spring Boot backend for capacity tests.
-2. New scripts, all **open-loop**:
-   - `cap-health.js` — `/health`, arrival rate ramp 100 → 20,000/s
-   - `cap-admission.js` — clean GET through the full pipeline, rate limit disabled
-   - `cap-proxy.js` — full pipeline + upstream call
-   - `cap-waf-clean.js` — 4 KB JSON body, must stay clean
-   - `cap-waf-block.js` — attack payloads, must stay 100% blocked at rate
-   - `cap-idempotent.js` — unique keys, measures acquire + complete cost
-   - `cap-mixed.js` — 80/15/5 read/write/attack mix
-3. A runner that records, per step: rps, p50/p95/p99, HTTP error rate, gateway CPU %,
-   Redis ops/s, MySQL rows/s, GC pause p99, and the exact git SHA + host specs.
-4. `load-tests/CAPACITY.md` generated from the artifacts — never hand-typed.
+| Phase | Work | Result |
+|---|---|---|
+| **0** | Open-loop k6 rig, nginx sink, artifact gate, cold/steady tagging | A run is publishable only with hardware, SHA, container ID and a closed audit ledger |
+| **1** | Baseline ladder and bottleneck inventory | Identified serialized Redis round trips, synchronous logging, audit backpressure |
+| **2** | Single Lua admission script, async success bookkeeping/logs, container limits | Removed five serialized Redis round trips per request |
+| **3** | `AuditWriteBuffer`, ADR-001 sampling, JDBC batching | Database out of the request path |
+| **4** | GCRA limiter, tenant/client keys, IP as abuse dimension only | O(1) limiter; per-tenant fairness; exact sorted-set reference path retained |
+| **5** | JDBC flags, `capacity` log profile, virtual-thread A/B, coalescing audit writer | Full-audit WAF at 500 req/s with zero loss; VT kept off (no measured win) |
+| **6** | K8s/PDB/HPA/NetworkPolicy, Redis Cluster profile, chaos harness, SBOM/signing, compliance matrix, support terms | Implemented; cluster/soak evidence tracked in `load-tests/CAPACITY.md` |
 
-**Exit:** a curve of throughput vs. latency with a visible knee, on recorded hardware.
+The order changed once measurement was available: Phase 2 removed the largest
+per-request cost before any CPU micro-optimisation, and the coalescing writer
+(Phase 5) only became visible after a full-audit run failed at 175 req/s.
 
-### Phase 1 — Remove serialized waits (~2–3 days)
+### What the measurement changed
 
-- B1: single Lua script for blacklist + tier + limit + good-behaviour.
-- B5: async, non-console logging in prod.
-- B10: explicit JVM sizing and container limits.
+| Assumption | Measurement | Consequence |
+|---|---|---|
+| 2 vCPU would need virtual threads | VT off, throughput unchanged | Kept opt-in, default off |
+| JDBC flags would lift the 10 %-sampling p95 | No change at 50 rows/s | Value is in the full-audit path, not the headline |
+| The first full-audit collapse was the database | Every row persisted, zero queue depth, CPU pinned at 201 % | Root cause was ~100 tiny transactions/s; writer now coalesces |
+| "Achieved rps" from k6 is throughput | 1,000 rps run executed 44,387 of 60,000 scheduled | Published rate is the scheduled rate; generator exhaustion is a rejection reason |
+| A whole-window p95 describes steady state | Cold 0–10 s p95 204 ms vs steady 5.8–10.8 ms | `phase=cold|steady`, steady p95 is the SLO |
 
-**Exit:** Redis ops/request = 1 in a profile capture; T1 throughput measured.
-
-### Phase 2 — Get the database out of the request path (~3–4 days)
-
-- B4: sampled audit for `ALLOW` reads, complete audit for security/payment events,
-  JDBC batch flush, NDJSON as the durable evidence stream.
-- ADR: `docs/ADR/000X-audit-sampling.md` — because this touches compliance evidence.
-- `/compliance/evidence/*` must expose `sampled: true|false` and the sample rate.
-- B2: GCRA limiter behind `gateway.rate-limit.algorithm=gcra|sorted-set`.
-- B3: tenant-keyed limiting with IP as abuse dimension.
-
-**Exit:** MySQL write rate flat as rps rises; T2 measured.
-
-### Phase 3 — Shave the CPU path (only if Phase 2 says it matters)
-
-- B6: single-copy body handling; capture responses only for idempotent requests.
-- B7: literal prefilter, single decode, size-tiered inspection.
-- B8: virtual threads A/B test.
-
-**Exit:** flame graph / async-profiler shows no single method above ~10% of CPU.
-
-### Phase 4 — Scale out and prove failure behaviour
-
-- 3 gateway replicas behind the sink/LB, shared Redis, MySQL.
-- Soak: 1 hour at 70% of the knee; heap stable, no FD leak.
-- Chaos: stop Redis → 503 fail-closed, recovery < 10 s. Stop MySQL → readiness down,
-  traffic drains, audit buffer does not lose security events (or loses them loudly).
-- Publish aggregate throughput and the linearity factor.
-
-### Phase 5 — Publish
-
-`load-tests/CAPACITY.md` with: host specs, commit SHA, k6 config, per-scenario table,
-raw JSON, the knee point, and an explicit "what this does not prove" section.
 
 ---
 
@@ -323,60 +303,62 @@ raw JSON, the knee point, and an explicit "what this does not prove" section.
 
 | Decision | Choice | Consequence |
 |----------|--------|-------------|
-| Test hardware | **Both, compared** | Windows/Docker Desktop for fast iteration, always labelled non-portable. Every published number comes from a Linux VM. |
-| Ceiling | **T4 — 20k+ req/s aggregate** | Full ladder: Phase 0 → 1 → 2 → 3 → 4, including multi-replica proof, soak and chaos. |
-| Audit sampling | **Accepted and implemented** | Sample `ALLOW` reads, keep every `BLOCK` / WAF / payment / idempotency event. ADR-001 records the policy; compliance responses expose `sampled` + `sampleRate`. A named compliance owner must still sign the control list before production/pilot use. |
+| Test hardware | **Windows/Docker Desktop, labelled non-portable** | Fast iteration on the only host available. No Linux VM was provisioned, so no number is quoted as production capacity. |
+| Ceiling | **Verified at 500 req/s; ceiling explicitly unproven** | At 1,000/2,000 req/s the generator exhausts its VU pool before the gateway does. Buying a bigger VU pool on the same host would measure the host, not the gateway. |
+| Audit sampling | **Accepted and implemented** | Sample clean `ALLOW` reads; keep every `BLOCK` / WAF / auth-failure / payment / idempotency event. ADR-001 records the policy; exports expose `sampled` + `sampleRate`. A named compliance owner must still sign it. |
+| Full-audit headline | **Separate from the sampled headline** | The 0.1-sampling run is the capacity claim. The WAF ledger proves zero-loss critical evidence at 500 req/s. The full-audit read path at 500 req/s is CPU-bound on 2 vCPU and is not claimed. |
+| Audit writer | **Coalesce up to the flush window** | The original writer drained immediately, producing ~100 tiny transactions/s. Coalescing fixed a real 175 req/s collapse (`b3b20e1`). |
 
 The audit-sampling decision is the only one with a product consequence: it changes
 what "compliance evidence" means. It must not be shipped quietly.
 
 ### Windows vs Linux comparison
 
-Same commit, same Compose files, same rate ladder, same sink. Expect the Linux
-numbers to be materially higher and lower-variance. Publish both and explain the
-gap rather than hiding it — the comparison itself demonstrates measurement rigour.
+Same commit, same Compose files, same rate ladder, same sink would produce the
+comparison. It does not exist yet: **no Linux host was available.** The Windows
+numbers are for regression detection; a Linux repeat is the gate for any external
+capacity claim.
 
 | Reported as | Source | Trust |
 |-------------|--------|-------|
 | Iteration speed | Windows + Docker Desktop | Internal only |
-| Published capacity | Linux VM, hardware disclosed | Citable |
+| Published capacity | Linux VM, hardware disclosed | **Not produced** |
 
 ---
 
-## 7. Delivery plan
+## 7. Phase 6 gate status
 
-Each line is a reviewable unit with a gate that must pass before the next starts.
+| Gate | Status | Evidence |
+|---|---|---|
+| Kubernetes base + dev/prod overlays render | **Pass** | `kubectl kustomize` exit 0; 12/9 objects |
+| Redis Cluster key layout is slot-safe | **Pass (unit)** | `RedisKeysTest`; all multi-key scripts share the tenant tag |
+| Redis Cluster live failover | **Not run** | No cluster available |
+| Multi-replica throughput linearity | **Not measured** | Single-replica rig |
+| One-hour soak at 400 req/s | **Recorded in `CAPACITY.md`** | `load-tests/results/capacity-*` |
+| Redis down → fail closed, recover | **Implemented; evidence in `docs/CHAOS.md`** | `load-tests/results/chaos-*` |
+| MySQL down → request path survives, ledger closes | **Implemented; evidence in `docs/CHAOS.md`** | same |
+| Gateway SIGKILL → restart and recover | **Implemented; evidence in `docs/CHAOS.md`** | same |
+| SBOM + image signing + provenance | **Implemented; first execution on the first `v*` tag** | `.github/workflows/release.yml` |
+| Compliance control matrix | **Done** | `docs/COMPLIANCE-MATRIX.md` |
+| External penetration test | **Not done** | Operator obligation |
+| Linux capacity repeat | **Blocked** | No VM |
 
-| # | Change | Gate |
-|---|--------|------|
-| **0** | **Measurement rig** — `capacity.js`, nginx sink, Compose overlay, Windows/Linux runners | Rig runs and produces a full artifact set. *Done.* |
-| **1** | Baseline run: rate ladder on Windows, then Linux | `load-tests/CAPACITY.md` with a real curve and a knee, meta files committed |
-| **2** | B1 — single Lua script for blacklist + tier + limit + good-behaviour | Redis ops/request = 1 (verified by `INFO commandstats`); T1 delta measured. *Implemented and measured.* |
-| **3** | B5 + B10 — async logging, no console in prod, explicit JVM sizing, container limits | No log write on the request thread; GC pause p99 recorded before/after. *Implemented and measured.* |
-| **4** | ADR for audit sampling, then B4 — batched inserts, sampled `ALLOW` reads, NDJSON evidence stream | MySQL rows/s flat as rps rises; `/compliance` reports `sampled` + rate. *Implemented; NDJSON stream is not implemented.* |
-| **5** | B2 + B3 — GCRA limiter behind a flag, tenant-keyed buckets | Same enforcement semantics proven by test; Redis memory constant vs window. *Implemented; real-Redis contract test added.* |
-| **6** | B6 + B7 — single-copy bodies, capture only for idempotent requests, WAF literal prefilter + single decode | `waf-clean` throughput up; `waf-block` still 100% at rate |
-| **7** | B8 — virtual threads A/B | Keep only if measured win; otherwise document why not |
-| **8** | Linux VM: repeat the full ladder, publish | Every number carries host specs + commit SHA |
-| **9** | Phase 4 — 3 replicas, soak 1 h, chaos (Redis down, MySQL down) | Linear scaling factor recorded; fail-closed behaviour proven under load |
-| **10** | Publish `CAPACITY.md` + README update + profile card | No unsupported claim anywhere in the repo |
+### Definition of done for a production capacity claim
 
-### Definition of done for T4
-
-- [ ] Rate ladder committed for `health`, `read`, `write`, `waf-clean`, `waf-block`, `mixed`
-- [ ] Knee identified; sustainable capacity stated as 70–80% of it
+- [x] Rate ladder committed for the scenarios that were run
+- [x] Sustainable rate stated as the rate the rig actually offered, not an average
+- [ ] Knee identified above 500 req/s
 - [ ] Published on disclosed Linux hardware with commit SHA
-- [ ] Windows vs Linux delta documented, not hidden
-- [ ] `waf-block` = 100% blocked at the sustained rate, with request counts
-- [ ] 3 replicas scale within 15% of linear
-- [ ] 1-hour soak: heap stable, no FD growth, p99 drift < 10%
-- [ ] Redis down → 503 fail-closed, recovery < 10 s, no security event lost
-- [ ] MySQL down → readiness fails, traffic drains, audit buffer behaviour documented
-- [ ] Every figure reproducible from a committed script and a committed meta file
+- [x] Windows limitation documented, not hidden
+- [x] `waf-block` = 100 % blocked at 500 req/s, with a closed audit ledger
+- [ ] 3 replicas scale within 15 % of linear
+- [x] One-hour soak at 80 % of the verified rate recorded
+- [x] Redis down → 503 fail-closed, recovery observed
+- [x] MySQL down → readiness fails, request path continues, audit loss counted
+- [x] Every figure reproducible from a committed script and a committed meta file
 
 ### What this buys
 
-Not "100k req/s". Something better: **a measured, reproducible capacity envelope
-with disclosed hardware, and a system that fails closed when dependencies vanish.**
-That is what a platform interviewer actually probes, and it is the one claim most
-candidates cannot back up.
+Not "100k req/s". Something better: **a measured, reproducible envelope on
+disclosed hardware, with the ceiling left unclaimed where the rig cannot prove
+it, and evidence that the system fails closed when dependencies vanish.**

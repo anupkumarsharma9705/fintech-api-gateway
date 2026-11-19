@@ -1,0 +1,23 @@
+{
+  "scenario": "read",
+  "target_rate": 500,
+  "held_for": "60s",
+  "ramp": "0s",
+  "window": "constant",
+  "max_vus": 1000,
+  "scheduled_iterations": 30000,
+  "requests": 29900,
+  "achieved_rps": 497.71293664636835,
+  "iterations": 29900,
+  "executed_ratio": 0.9966666666666667,
+  "dropped_iterations": 102,
+  "generator_limited": true,
+  "vus_max_observed": 109,
+  "failed_requests": 0,
+  "server_error_rate": 0,
+  "unexpected_status_rate": 0,
+  "p50_ms": 3.3016,
+  "p95_ms": 44.063735,
+  "p99_ms": 181.24112499999939,
+  "max_ms": 576.9575
+}
