@@ -4,129 +4,139 @@
 
 ---
 
-## Executive summary
+## Executive summary (2026-11-19)
 
-| Metric | Baseline (`ea1ce03`) | After (`f18bfe0`) | Change |
-|---|---|---|---|
-| **read knee (p95 ≤ 50 ms, 5xx < 0.1%)** | ~200 req/s | ~500 req/s | **+150%** |
-| **read @ 500 rps (p95)** | 7,382 ms (collapsed) | 27,914 ms (sustained) | — |
-| **read @ 1000 rps (p95)** | 43,450 ms | 16,712 ms | **-62%** |
-| **read @ 2000 rps (5xx)** | 6.77% | 0% | **eliminated** |
-| **health ceiling** | 867 req/s | 868 req/s | unchanged |
+| Metric | Verified value | Hardware | Evidence |
+|--------|----------------|----------|----------|
+| **Sustained sampled read @ 500 rps** | steady p95 9.1 ms, p99 22.0 ms | Windows 11, 12 vCPU, 16 GB, Docker Desktop 29.9.2, 2 CPU / 1 GiB gateway | `capacity-read-saturated-500rps-20261118-132910` |
+| **Sustained sampled read @ 400 rps (1 h soak)** | steady p95 6.2 ms, p99 2.2 s | Same host, 1-hour run | `capacity-read-saturated-400rps-20261119-223824` |
+| **WAF clean-traffic @ 500 rps** | p95 4.4 ms, zero audit drops | Same host | `capacity-waf-block-saturated-500rps-20261118-130955` |
+| **Health endpoint @ 1,000 rps** | p95 4.2 ms | Same host | `capacity-health-saturated-1000rps-20261118-125523` |
+| **Full-audit read @ 500 rps** | **Not publishable** — generator exhausted, p95 6,475 ms | Same host | `capacity-read-saturated-500rps-20261119-205701` |
+| **Ceiling above 500 rps** | **Unproven** — 12 vCPU host exhausts k6 VUs first | — | — |
 
-**The admission collapse (B1) moved the knee from ~200 to ~500 req/s.** The audit logger is now the bottleneck: every `read` request above ~500 rps is limited by synchronous DB writes on the request thread via `CallerRunsPolicy`. Phase 3 (audit sampling/batching, gated by [ADR-001](../docs/adr/ADR-001-audit-sampling.md)) is required to push further.
+**The verified capacity claim is 500 req/s (sampled) on the disclosed Windows/Docker Desktop host.**  
+Full-audit (sample rate 1.0) collapses at 178 rps on this host; the generator also exhausts at 500 rps.  
+No Linux numbers exist — no VM was provisioned.
 
 ---
 
-## Test environment
+## Test environment (frozen for this report)
 
 | Property | Value |
 |---|---|
-| Host OS | Windows 11 Pro 26300 |
-| Container runtime | Docker Desktop 29.9.2 (WSL2 backend) |
+| Host OS | Windows 11 Pro 26300 (Docker Desktop 29.9.2 / WSL2) |
 | Host CPUs | 12 vCPU |
-| Gateway limit | 2 CPUs / 1g (`deploy.resources.limits`) |
-| k6 version | v2.4.0 |
-| JVM | Eclipse Temurin 21, G1, `-XX:MaxRAMPercentage=75` |
-| Baseline commit | `ea1ce03` |
-| After commit | `f18bfe0` |
+| Host RAM | 16 GB |
+| Gateway CPUs (container limit) | 2.0 |
+| Gateway memory (container limit) | 1 GiB |
+| k6 version | v2.4.0 (windows/amd64) |
+| k6 max VUs (capacity runs) | 800–2,000 per scenario |
+| Arrival schedule | **Open-loop, constant rate** (`ramp=0s`); `steady_after_s=10` |
+| Audit sample rate (capacity claim) | 0.1 |
+| Audit sample rate (WAF ledger) | 1.0 |
+| Rate limit algorithm | GCRA (Redis hash, O(1)) |
+| Limiter keys | Quota: `tenant:client`; Abuse: `tenant:IP` |
+| Sink upstream | `nginx:1.27-alpine` returning fixed JSON (zero backend cost) |
+| Commit (500 rps sampled) | `52087a3` (tree clean) |
+| Commit (400 rps soak) | `b3acce1` (tree clean) |
+| Commit (WAF 500 rps) | `0bf87cf` (tree clean) |
 
-> **⚠️ Hardware disclaimer:** All measurements on Windows / Docker Desktop. The virtual switch and port mapping add latency and variance not present on bare-metal Linux. **Run on Linux VM for publishable numbers.**
-
----
-
-## Scenario: `health` — `GET /health` (bypasses admission pipeline)
-
-| Commit | Target | Achieved rps | p50 | p95 | p99 | 5xx |
-|---|---|---|---|---|---|---|
-| `ea1ce03` | 1000 | 867.5 | 0.0 ms | 4.9 ms | 0.0 ms | 0% |
-| `f18bfe0` | 1000 | 867.6 | 2.2 ms | 8.3 ms | 26.5 ms | 0% |
-
-Servlet + Tomcat + JVM ceiling is unchanged. The `p50`/`p99` values were previously published as `0` because k6 only computes percentiles it is asked for; `summaryTrendStats` fix in `f18bfe0` makes them visible.
+> **Windows limitation:** Docker Desktop on WSL2 adds virtual-switch + port-mapping overhead. These numbers are for regression detection. **No Linux capacity claim is made.**
 
 ---
 
-## Scenario: `read` — `GET /api/account/balance` (full admission pipeline)
+## Published runs (gate-passing only)
 
-### Baseline (`ea1ce03`) — 5 serialized Redis calls per request
+The verification gate (`verify-artifacts.ps1`) accepts a run only when:
+- `git_dirty = false`
+- `k6 exit code ∈ {0, 99}` (99 = threshold crossed, expected for saturated steps)
+- No unexpected HTTP status codes
+- 5xx rate ≤ 0.1%
+- Gateway container did not restart mid-run
+- Steady-state samples exist (`no_steady_samples` is a rejection)
+- `generator_limited = false` **for ceiling claims** (soak at 80 % of verified rate is accepted with `generator_limited=true` if steady p95 meets SLO)
 
-| Target rps | Achieved rps | p50 | p95 | p99 | 5xx | Failed |
-|---|---|---|---|---|---|---|
-| 200 | 110.4 | 0.0 ms | 13,876.5 ms | 0.0 ms | 0% | 0 |
-| 500 | 19.4 | 0.0 ms | 7,381.8 ms | 0.0 ms | 0% | 0 |
-| 1000 | 214.6 | 1,114.8 ms | 43,450.2 ms | 47,346.5 ms | 0% | 0 |
-| 2000 | 295.7 | 1,024.3 ms | 59,999.1 ms | 60,004.3 ms | 6.77% | 2,005 |
+| Started | Scenario | Rate | Window | Sample | Exit | Requests | Exec % | Drops | GenLim | p95 (whole/steady) | p99 | 5xx | Unexpected | Audit dropped | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-18 12:55 | health | 1,000 | constant | 1.0 | 0 | 60,001 | 100.0 | 0 | no | 4.2 / — | 13.5 | 0.00% | 0.00% | 0 | **PUBLISH** |
+| 2026-11-18 12:59 | read | 200 | constant | 1.0 | 0 | 12,001 | 100.0 | 0 | no | 7.4 / — | 13.5 | 0.00% | 0.00% | 0 | **PUBLISH** |
+| 2026-11-18 13:09 | waf-block | 500 | constant | 1.0 | 0 | 30,001 | 100.0 | 0 | no | 4.4 / — | 8.7 | 0.00% | 0.00% | 0 | **PUBLISH** |
+| 2026-11-18 13:29 | **read** | **500** | **constant** | **0.1** | **0** | **30,001** | **100.0** | **0** | **no** | **8.8 / 9.1** | **20.3** | **0.00%** | **0.00%** | **0** | **PUBLISH** |
+| 2026-11-19 22:38 | **read (soak)** | **400** | **constant** | **0.1** | **99** | **1,432,623** | **99.5** | **7,378** | **yes** | **6.4 / 6.2** | **2,187** | **0.00%** | **0.00%** | **0** | **PUBLISH** |
 
-> At 500 rps the gateway collapses: the audit queue exhausts, `CallerRunsPolicy` executes INSERTs on Tomcat threads, and the effective throughput drops to ~20 rps.
+**Key observations:**
 
-### After (`f18bfe0`) — 1 Redis call + async success bookkeeping
-
-| Target rps | Achieved rps | p50 | p95 | p99 | 5xx | Failed |
-|---|---|---|---|---|---|---|
-| 200 | 115.8 | 1,533.9 ms | 7,867.0 ms | 8,853.0 ms | 0% | 0 |
-| 500 | 191.2 | 1,064.3 ms | 27,913.5 ms | 30,908.6 ms | 0% | 0 |
-| 1000 | 128.3 | 512.5 ms | 16,711.6 ms | 18,859.0 ms | 0.15% | 24 |
-| 2000 | 268.8 | 1,454.5 ms | 42,976.6 ms | 44,115.6 ms | 0% | 0 |
-
-> **Key improvements:**
-> - 500 rps **sustains near offered rate** (191 vs 19 rps baseline)
-> - p95 at 1000 rps **improved 62%** (43.5s → 16.7s)
-> - 2000 rps **5xx eliminated** (6.77% → 0%)
-> - **Throughput ceiling ~270 rps** — bounded by `AuditLogger.log()` → `PersistenceService.saveAuditLog()` synchronous DB write on request thread
+- The 500 rps sampled run (13:29) is the **capacity claim**: zero generator drops, steady p95 9.1 ms.
+- The 400 rps soak (22:38) ran 1 hour; generator exhausted 7,378 iterations (max VUs = 800), but **steady p95 6.2 ms** meets the SLO. The cold p95 (3,635 ms) crossed the 50 ms threshold → exit 99. Gate accepts because steady state is healthy and the container did not restart.
+- Full-audit reads at 500 rps (19:16, 20:57) are **not publishable**: generator exhausted, achieved ~178 rps, p95 ~6,500 ms. They prove the audit path is the bottleneck at sample=1.0.
+- WAF at 500 rps with sample=1.0 serves 30,001 requests with zero drops and p95 4.4 ms — the critical evidence path is not the limiter.
 
 ---
 
-## Scenario: `waf-block` — `GET` with SQLi (WAF must block 100%)
+## Audit evidence (from the 500 rps sampled run)
 
-| Commit | Target rps | Achieved rps | p50 | p95 | p99 | Blocked |
-|---|---|---|---|---|---|---|
-| `ea1ce03` | 500 | 433.8 | 2.9 ms | 5.3 ms | 8.7 ms | 36,874 |
-| `f18bfe0` | 500 | 432.7 | 2.9 ms | 6.7 ms | 176.8 ms | 36,866 |
+| Metric | Critical | Sampled |
+|---|---:|---:|
+| `gateway_audit_persisted_total` | 31,400 | 17,268 |
+| `gateway_audit_dropped_total` (all reasons) | 0 | 0 |
+| `gateway_audit_queue_depth` (end) | 0 | 0 |
+| `gateway_audit_sampled_out_total` | — | 156,440 |
 
-WAF path bypasses admission; results identical within noise. The `p99` variance is k6 timer granularity at low latency.
-
----
-
-## What changed between commits
-
-| Commit | Change | Bottleneck addressed |
-|---|---|---|
-| `00d8804` | `AdmissionGate` — one Lua script for blacklist + tier + sliding window | **B1** (5 Redis calls → 1) |
-| `00d8804` | `TrustTierService.recordSuccess` — `@Async`, one script clears throttle + increments good-count | **B2** (2 writes → 1 async) |
-| `00d8804` | `logback-spring.xml` — `AsyncAppender` (8192 queue, no drop, backpressure); CONSOLE dropped in prod | **B5** (disk I/O off request thread) |
-| `00d8804` | Dockerfile — `JAVA_OPTS` + `exec java`; compose `deploy.resources.limits: 2 CPU / 1g` | **B10** (predictable heap, PID 1) |
-| `f18bfe0` | `capacity.js` — `summaryTrendStats` so p50/p99 are actually computed | **reporting fix** |
+The writer coalesces up to `write-flush-interval=100ms` / `write-batch-size=500` (`b3b20e1`). At 500 rps / sample=0.1, the sampled queue drains continuously; the critical queue (WAF blocks, auth failures, payments, idempotency) is empty because the `read` scenario produces only clean ALLOW traffic.
 
 ---
 
-## Next phase (Phase 3 — gated)
+## What is **not** claimed
 
-**Audit sampling & batching** ([ADR-001](../docs/adr/ADR-001-audit-sampling.md), Proposed — requires compliance sign-off).
-
-Only after sampling (clean ALLOW only, never BLOCK/WAF/auth/payment) and batched async writes can the gateway exceed ~500 rps sustained on the `read` path.
-
----
-
-## Artifacts
-
-| File | Contents |
+| Claim | Why not |
 |---|---|
-| `capacity-<tag>.json` | Raw k6 samples |
-| `capacity-<tag>.summary.json` | Throughput, p50/p95/p99, error rates |
-| `capacity-<tag>.meta.json` | Git SHA, dirty flag, OS, CPU count, Docker/k6 versions, rate schedule, container CPU/memory |
-| `capacity-<tag>.prometheus.txt` | Gateway metrics snapshot |
-
-**Baseline artifacts:** `load-tests/results/capacity-*-20261116-20*.summary.json` (commit `ea1ce03`)  
-**After artifacts:** `load-tests/results/capacity-*-20261116-21*.summary.json` (commit `f18bfe0`)
+| "500 rps full-audit" | Generator exhausts; achieved 178 rps; p95 6,475 ms |
+| ">500 rps ceiling" | k6 VU pool exhausted on this host before the gateway saturates |
+| "Linux production capacity" | No Linux VM provisioned; Windows/Docker Desktop only |
+| "3-replica linearity" | Single-replica rig; no live cluster |
+| "Redis Cluster failover" | Key layout tested; no cluster available |
+| "PCI-DSS/RBI/NPCI certified" | Control matrix exists (COMPLIANCE-MATRIX.md); named compliance owner must sign ADR-001 sampling policy |
 
 ---
 
-## Not covered here
+## Reproducing a published run
 
-- Business correctness of payments — see `scripts/smoke-test.sh`
-- Multi-replica aggregate throughput — Phase 4 of `docs/SCALING-PLAN.md`
-- TLS termination cost — measured at the load balancer, not the gateway
-- Sustained soak and memory stability — separate 1-hour run
-- Linux bare-metal numbers — **required before any public claim**
+```powershell
+# 1. Check out the exact commit
+git checkout 52087a3
 
-See `docs/SCALING-PLAN.md` for the full bottleneck analysis (B1–B10) and the T0–T4 delivery plan.
+# 2. Run the capacity test (requires Docker Desktop, k6)
+.\load-tests\capacity\run.ps1 -Scenario read -Mode saturated -Rate 500 -Hold 60s -AuditSampleRate 0.1 -NoRawJson
+
+# 3. Verify the artifacts
+.\load-tests\capacity\verify-artifacts.ps1 -Filter 'capacity-read-saturated-500rps-20261118-132910.meta.json' -Markdown
+```
+
+The meta file records the hardware, commit, container ID, rate schedule and resource samples. The summary and Prometheus metrics are the raw evidence. A different host will produce different absolute numbers — that is expected and honest.
+
+---
+
+## Artifact index
+
+All gate-passing artifacts are committed under `load-tests/results/`:
+
+```
+capacity-health-saturated-1000rps-20261118-125523.{summary.json,meta.json,prometheus.txt}
+capacity-read-saturated-200rps-20261118-125940.{summary.json,meta.json,prometheus.txt}
+capacity-waf-block-saturated-500rps-20261118-130955.{summary.json,meta.json,prometheus.txt}
+capacity-read-saturated-500rps-20261118-132910.{summary.json,meta.json,prometheus.txt}
+capacity-read-saturated-400rps-20261119-223824.{summary.json,meta.json,prometheus.txt}
+```
+
+The large per-request JSON files (`capacity-*.json`) are **not committed** (`.gitignore`); only the summary, meta and Prometheus snapshot are.
+
+---
+
+## Previous (superseded) results
+
+`load-tests/RESULTS.md` contains closed-loop measurements with sleeps that capped the generator at 5–100 req/s. They are kept only as history. **Do not quote them.**
+
+---
+
+*Generated 2026-11-19 from `verify-artifacts.ps1` output. The gate is the source of truth.*

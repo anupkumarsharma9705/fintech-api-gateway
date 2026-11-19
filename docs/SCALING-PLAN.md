@@ -18,12 +18,13 @@ are tracked below. The Linux publishing run remains blocked on a VM.
 | GCRA limiter + tenant/client keying | Done | `RateLimitScripts`, `RedisKeys` |
 | Real-Redis limiter contract test | Done (opt-in) | `RateLimitScriptsIntegrationTest` |
 | Windows ladder, 200–500 req/s | Done | `load-tests/CAPACITY.md` |
-| Full-audit read at 500 req/s | **Not verified on this host** — CPU-bound, generator-limited | new full-audit artifacts |
-| Ceiling above 500 req/s | **Unproven** — the 12 vCPU host exhausts generator VUs first | `CAPACITY.md` |
+| **Sampled read @ 500 req/s (capacity claim)** | **Published** — steady p95 9.1 ms, zero drops | `capacity-read-saturated-500rps-20261118-132910` |
+| **Full-audit read @ 500 req/s** | **Not publishable** — CPU-bound, generator exhausted | `capacity-read-saturated-500rps-20261119-205701` |
+| **Ceiling above 500 req/s** | **Unproven** — the 12 vCPU host exhausts generator VUs first | `CAPACITY.md` |
 | Kubernetes base + overlays | Render-validated, not cluster-tested | `deploy/k8s/`, `docs/KUBERNETES.md` |
 | Redis Cluster profile | Implemented and key-layout tested; not live-tested | `application-redis-cluster.properties`, `RedisKeysTest` |
-| Chaos harness (Redis, MySQL, gateway kill) | Implemented; evidence in `load-tests/results/chaos-*` | `load-tests/chaos/`, `docs/CHAOS.md` |
-| One-hour soak at 80 % of the verified rate | Running / recorded in `CAPACITY.md` | capacity artifact |
+| Chaos harness (Redis, MySQL, gateway kill) | **PASS (16/16)**; evidence committed | `load-tests/chaos/`, `docs/CHAOS.md`, `load-tests/results/chaos-20261119-223412.json` |
+| **One-hour soak at 80 % of the verified rate** | **Done** — steady p95 6.2 ms, generator limited | `capacity-read-saturated-400rps-20261119-223824` |
 | SBOM, image signing, provenance | Workflows implemented; first execution is the first `v*` tag | `.github/workflows/release.yml`, `security.yml` |
 | Compliance control matrix and support terms | Done | `docs/COMPLIANCE-MATRIX.md`, `SUPPORT.md` |
 | Linux VM repeat | **Blocked: no VM provisioned** | — |
@@ -334,10 +335,10 @@ capacity claim.
 | Redis Cluster key layout is slot-safe | **Pass (unit)** | `RedisKeysTest`; all multi-key scripts share the tenant tag |
 | Redis Cluster live failover | **Not run** | No cluster available |
 | Multi-replica throughput linearity | **Not measured** | Single-replica rig |
-| One-hour soak at 400 req/s | **Recorded in `CAPACITY.md`** | `load-tests/results/capacity-*` |
-| Redis down → fail closed, recover | **Implemented; evidence in `docs/CHAOS.md`** | `load-tests/results/chaos-*` |
-| MySQL down → request path survives, ledger closes | **Implemented; evidence in `docs/CHAOS.md`** | same |
-| Gateway SIGKILL → restart and recover | **Implemented; evidence in `docs/CHAOS.md`** | same |
+| **One-hour soak at 400 req/s** | **PASS** | `capacity-read-saturated-400rps-20261119-223824` (steady p95 6.2 ms) |
+| Redis down → fail closed, recover | **PASS (4/4)** | `chaos-20261119-223412.json` Redis phase |
+| MySQL down → request path survives, ledger closes | **PASS (4/4)** | `chaos-20261119-223412.json` MySQL phase |
+| Gateway SIGKILL → restart and recover | **PASS (4/4)** | `chaos-20261119-223412.json` gateway phase |
 | SBOM + image signing + provenance | **Implemented; first execution on the first `v*` tag** | `.github/workflows/release.yml` |
 | Compliance control matrix | **Done** | `docs/COMPLIANCE-MATRIX.md` |
 | External penetration test | **Not done** | Operator obligation |
