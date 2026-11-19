@@ -32,6 +32,10 @@ TENANT="${CAPACITY_TENANT:-default}"
 # latter for real deployments.
 PROFILES="${CAPACITY_PROFILES:-dev,capacity}"
 VIRTUAL_THREADS="${VIRTUAL_THREADS:-false}"
+# A one-hour soak at 400 req/s writes millions of raw sample lines. The gate
+# reads summary.json + meta.json + the Prometheus snapshot, so long runs can
+# set RAW_JSON=0 and keep the evidence without multiple GB of JSON.
+RAW_JSON="${RAW_JSON:-1}"
 
 [[ "$AUDIT_SAMPLE_RATE" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] \
   || { echo "AUDIT_SAMPLE_RATE must be within [0,1], got '$AUDIT_SAMPLE_RATE'"; exit 1; }
@@ -107,6 +111,12 @@ reset_admission_state
 
 echo "==> measured run: $SCENARIO @ ${RATE} req/s for $HOLD"
 JSON_OUT="load-tests/results/capacity-${TAG}.json"
+K6_JSON_ARGS=()
+if [[ "$RAW_JSON" != "0" ]]; then
+  K6_JSON_ARGS=(-o "json=$JSON_OUT")
+else
+  echo "==> raw per-request JSON disabled (RAW_JSON=0)"
+fi
 
 # The post-run `docker stats` snapshot is taken after the cooldown, so it
 # reports idle CPU. Peak CPU during the measured window is what the acceptance
@@ -129,7 +139,7 @@ set +e
 k6 run \
   -e "SCENARIO=$SCENARIO" -e "RATE=$RATE" -e "RAMP=$RAMP" -e "HOLD=$HOLD" \
   -e "P95_BUDGET=$P95_BUDGET" -e "STEADY_AFTER=10s" -e "MAX_VUS=$MAX_VUS" \
-  -o "json=$JSON_OUT" \
+  "${K6_JSON_ARGS[@]}" \
   load-tests/capacity/capacity.js
 K6_EXIT=$?
 set -e
@@ -275,13 +285,19 @@ cat > "load-tests/results/capacity-${TAG}.meta.json" <<EOF
   "docker_version": "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)",
   "k6_version": "$(k6 version 2>/dev/null || echo unknown)",
   "started_at": "${STAMP}",
+  "raw_json": $(if [[ "$RAW_JSON" != "0" ]]; then echo true; else echo false; fi),
+  "artifacts": {
+    "k6_json": $(if [[ "$RAW_JSON" != "0" ]]; then echo "\"${JSON_OUT}\""; else echo null; fi),
+    "summary": "load-tests/results/capacity-${TAG}.summary.json",
+    "metrics": "load-tests/results/capacity-${TAG}.prometheus.txt"
+  },
   "resources": { "samples": ${RESOURCE_SAMPLES}, "cpu_peak_pct": ${CPU_PEAK}, "mem_peak_mib": ${MEM_PEAK} }
 }
 EOF
 
 echo
 echo "Artifacts:"
-echo "  ${JSON_OUT}"
+if [[ "$RAW_JSON" != "0" ]]; then echo "  ${JSON_OUT}"; fi
 echo "  load-tests/results/capacity-${TAG}.summary.json"
 echo "  load-tests/results/capacity-${TAG}.meta.json"
 echo "  load-tests/results/capacity-${TAG}.prometheus.txt"

@@ -51,6 +51,10 @@ param(
     # Disable resource sampling entirely. Only for A/B runs that need to prove
     # the sampler is not influencing the latency under test.
     [switch]$NoSampler,
+    # Skip the per-request k6 JSON. A one-hour soak at 400 req/s writes roughly
+    # 1.4 million sample lines (multiple GB); the summary, meta and Prometheus
+    # snapshot are the evidence the gate reads, so long runs do not need it.
+    [switch]$NoRawJson,
     [switch]$NoRebuild
 )
 
@@ -237,16 +241,22 @@ else {
     $sampler = Start-ResourceSampler $resourceFile
 }
 
-k6 run `
-    -e "SCENARIO=$Scenario" `
-    -e "RATE=$Rate" `
-    -e "RAMP=$Ramp" `
-    -e "HOLD=$Hold" `
-    -e "P95_BUDGET=$P95Budget" `
-    -e "STEADY_AFTER=10s" `
-    -e "MAX_VUS=$MaxVus" `
-    -o "json=$jsonOut" `
-    load-tests/capacity/capacity.js
+$k6Args = @(
+    '-e', "SCENARIO=$Scenario",
+    '-e', "RATE=$Rate",
+    '-e', "RAMP=$Ramp",
+    '-e', "HOLD=$Hold",
+    '-e', "P95_BUDGET=$P95Budget",
+    '-e', 'STEADY_AFTER=10s',
+    '-e', "MAX_VUS=$MaxVus"
+)
+if (-not $NoRawJson) {
+    $k6Args += @('-o', "json=$jsonOut")
+} else {
+    Write-Host 'Raw per-request JSON disabled (-NoRawJson).' -ForegroundColor DarkGray
+}
+$k6Args += 'load-tests/capacity/capacity.js'
+k6 run @k6Args
 
 $k6Exit = $LASTEXITCODE
 # Stop sampling before the cooldown, otherwise idle time is averaged in.
@@ -348,8 +358,9 @@ $meta = [ordered]@{
     docker_version        = (docker version --format '{{.Server.Version}}' 2>$null)
     k6_version            = (k6 version 2>$null)
     started_at            = $stamp
+    raw_json              = (-not $NoRawJson)
     artifacts             = [ordered]@{
-        k6_json = $jsonOut
+        k6_json = if ($NoRawJson) { $null } else { $jsonOut }
         summary = $summaryTagged
         metrics = $metricsPath
     }
@@ -364,7 +375,7 @@ $meta | ConvertTo-Json -Depth 5 | Set-Content -Path $metaPath -Encoding utf8
 
 Write-Host ''
 Write-Host 'Artifacts:' -ForegroundColor Green
-Write-Host "  $jsonOut"
+if (-not $NoRawJson) { Write-Host "  $jsonOut" }
 Write-Host "  $summaryTagged"
 Write-Host "  $metaPath"
 Write-Host "  $metricsPath"
