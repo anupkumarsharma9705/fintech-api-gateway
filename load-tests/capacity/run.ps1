@@ -330,6 +330,10 @@ $meta = [ordered]@{
     capacity_tenant       = $Tenant
     admission_reset       = $true
     gateway_profiles      = $Profiles
+    # The Prometheus counters live for the container's lifetime, not the git
+    # commit's. Keying the delta chain on the container ID keeps a harness-only
+    # commit from looking like a counter reset.
+    container_id          = (docker inspect -f '{{.Id}}' fintech-gateway-gateway-1 2>$null)
     virtual_threads       = $env:VIRTUAL_THREADS
     max_vus               = $MaxVus
     window                = $summary.window

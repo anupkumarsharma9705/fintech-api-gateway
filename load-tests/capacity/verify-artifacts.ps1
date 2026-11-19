@@ -99,6 +99,7 @@ $rows = foreach ($metaFile in $metas) {
         Cpus          = [double]$meta.gateway_cpus
         Profiles      = $meta.gateway_profiles
         GitSha        = $meta.git_sha
+        ContainerId   = $meta.container_id
         Dirty         = [bool]$meta.git_dirty
         Requests      = [int]$summary.requests
         Rps           = [double]$summary.achieved_rps
@@ -131,7 +132,15 @@ $rows = @($rows | Sort-Object StartedAt)
 
 $seen = @{}
 foreach ($row in $rows) {
-    $generation = '{0}|{1}|{2}|{3}|{4}' -f $row.GitSha, $row.SampleRate, $row.Cpus, $row.Mode, $row.Profiles
+    # Counters belong to a container, not a commit. A harness-only commit must
+    # not reset the audit delta chain. Older artifacts have no container_id;
+    # they fall back to the original composite key.
+    $generation = if ($row.ContainerId) {
+        "container:$($row.ContainerId)"
+    }
+    else {
+        '{0}|{1}|{2}|{3}|{4}' -f $row.GitSha, $row.SampleRate, $row.Cpus, $row.Mode, $row.Profiles
+    }
     $previous = $seen[$generation]
 
     $reset = $null -ne $previous -and (

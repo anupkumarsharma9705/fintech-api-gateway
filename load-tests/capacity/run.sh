@@ -235,6 +235,8 @@ curl -fsS "http://localhost:8081/actuator/prometheus" \
 GIT_SHA="$(git rev-parse HEAD)"
 GIT_DIRTY=false
 [[ -n "$(git status --porcelain -- ':!load-tests/results')" ]] && GIT_DIRTY=true
+# Prometheus counters are per container generation, not per commit.
+CONTAINER_ID="$(docker inspect -f '{{.Id}}' fintech-gateway-gateway-1 2>/dev/null || echo unknown)"
 
 cat > "load-tests/results/capacity-${TAG}.meta.json" <<EOF
 {
@@ -257,6 +259,7 @@ cat > "load-tests/results/capacity-${TAG}.meta.json" <<EOF
   "capacity_tenant": "${TENANT}",
   "admission_reset": true,
   "gateway_profiles": "${PROFILES}",
+  "container_id": "${CONTAINER_ID}",
   "virtual_threads": "${VIRTUAL_THREADS}",
   "max_vus": ${MAX_VUS},
   "window": "${WINDOW}",
