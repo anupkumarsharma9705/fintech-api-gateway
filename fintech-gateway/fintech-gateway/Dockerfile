@@ -3,7 +3,7 @@
 # ── Build stage ─────────────────────────────────────────────────────────────
 # The reactor root lists both modules, so the build context is the repository
 # root even though only the gateway is packaged here.
-FROM maven:3.9-eclipse-temurin-21 AS build
+FROM maven:3.9-eclipse-temurin-26 AS build
 WORKDIR /workspace
 
 COPY pom.xml ./
