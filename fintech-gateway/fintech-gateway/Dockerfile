@@ -14,7 +14,7 @@ COPY fintech-gateway/fintech-gateway/src fintech-gateway/fintech-gateway/src
 RUN mvn -B -ntp -pl fintech-gateway/fintech-gateway -am package -DskipTests
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
-FROM eclipse-temurin:21-jre-jammy
+FROM eclipse-temurin:22-jre-jammy
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
