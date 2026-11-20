@@ -89,7 +89,7 @@ jobs:
       # fixable CRITICAL findings do. The step runs before signing so a failing
       # scan leaves an unsigned image.
       - name: Scan image for fixable critical CVEs
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: table
